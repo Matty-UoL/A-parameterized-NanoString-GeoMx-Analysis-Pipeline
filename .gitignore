@@ -25,3 +25,6 @@ Thumbs.db
 
 # VennDiagram writes a timestamped log beside each plot it renders.
 *.png.*.log
+
+# GeoMx PKC is shipped gzipped; stage 1 gunzips it at render time.
+*.pkc
