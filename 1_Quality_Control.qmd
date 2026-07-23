@@ -32,7 +32,7 @@ code-block-border-left: "#31BAE9"
 params:
   project_root: "."
   # Conservative full-path budget for cross-platform R and graphics-device compatibility.
-  portable_path_limit: 240
+  portable_path_limit: 200
 
   # Standard project folders
   dir_data: "Data"

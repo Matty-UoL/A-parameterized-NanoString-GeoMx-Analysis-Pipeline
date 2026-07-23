@@ -67,7 +67,7 @@ params:
   # repository, set this to the project folder where stage 3 wrote its outputs.
   project_root: "."
   # Conservative full-path budget for cross-platform R and graphics-device compatibility.
-  portable_path_limit: 240
+  portable_path_limit: 200
   dir_outputs: "Outputs"
   dir_src: "src"
   dir_data: "Data"

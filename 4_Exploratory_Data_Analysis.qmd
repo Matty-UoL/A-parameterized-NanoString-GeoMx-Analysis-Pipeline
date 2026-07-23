@@ -45,7 +45,7 @@ params:
   # Root, same convention as QC / GeoDiff / Norm
   project_root: "."
   # Conservative full-path budget for cross-platform R and graphics-device compatibility.
-  portable_path_limit: 240
+  portable_path_limit: 200
 
   # Fixed folder names under root
   dir_outputs: "Outputs"

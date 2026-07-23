@@ -21,7 +21,7 @@ params:
   # Project paths and shared folders
   project_root: "."
   # Conservative full-path budget for cross-platform R and graphics-device compatibility.
-  portable_path_limit: 240
+  portable_path_limit: 200
   dir_outputs: "Outputs"
   dir_src: "src"
 
@@ -2292,7 +2292,18 @@ plot_top_gene_segment_panels <- function(genes, contrast_name) {
     ))
   }
 
-  all_samples_stub <- sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_all_samples"))
+  # Bound the stub at source. `contrast_name` is the raw stage-5 contrast expression
+  # (~150 chars for one-vs-rest), so an unbounded stub only gets truncated later by
+  # protocol_output_path(), which measures the *absolute* path and therefore makes the
+  # shipped filename depend on the render root. Bounding here caps the repo-relative
+  # path at 124 characters regardless of where the notebook was rendered.
+  all_samples_stub <- bounded_file_stem(
+    "top_genes",
+    selected_de_method,
+    contrast_name,
+    "all_samples",
+    max_chars = 64
+  )
   all_samples_result <- plot_gene_panel(
     genes = genes,
     panel_title = glue::glue("Top {length(genes)} DE genes\n{selected_contrast_display_label(contrast_name)} | all matched samples"),
@@ -2356,7 +2367,13 @@ plot_top_gene_segment_panels <- function(genes, contrast_name) {
   for (segment_label in segment_resolution$levels) {
     emit_markdown(glue::glue("\n\n##### {segment_label}\n\n"))
     segment_filter <- glue::glue("^{regex_escape(segment_label)}$")
-    segment_stub <- sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_{segment_label}"))
+    segment_stub <- bounded_file_stem(
+      "top_genes",
+      selected_de_method,
+      contrast_name,
+      segment_label,
+      max_chars = 64
+    )
 
     result <- plot_gene_panel(
       genes = genes,
@@ -2837,7 +2854,10 @@ for (method_name in names(method_results)) {
   )
 
   method_de_gene_summary <- method_inventory %>%
-    dplyr::filter(.data$method_name == method_name) %>%
+    # `.env$` is required: method_inventory has a `method_name` column, so a bare
+    # right-hand `method_name` resolves to that column under data masking and the
+    # predicate becomes col == col (always TRUE), giving every method the full table.
+    dplyr::filter(.data$method_name == .env$method_name) %>%
     dplyr::select(
       contrast,
       n_genes,
