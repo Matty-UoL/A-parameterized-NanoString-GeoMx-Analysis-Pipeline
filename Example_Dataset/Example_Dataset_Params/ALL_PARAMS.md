@@ -5,8 +5,8 @@ renders. One section per notebook. The per-notebook files in this folder carry t
 content split out individually.
 
 - **Dataset:** [GSE226829](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE226829) — pancreatic (PDAC) GeoMx WTA, 277 segments (AOIs), 6 sections (2 healthy, 4 tumour), 4 slides.
-- **To reproduce:** put inputs under `Data/`, helpers under `src/`; set each notebook's `params:` to the values below; render in stage order (`Rscript render_full_pipeline_timing.R`). `project_root: "."` resolves the root via `here::here()`.
-- **Grouping in each section:** *Dataset-specific* (match your data — cleared in the public notebooks) · *Analysis parameters* (keep to replicate) · *I/O & structural* (standard layout).
+- **To reproduce:** put inputs under `Data/`, helpers under `src/`; set each notebook's `params:` to the values below; render in stage order 0 → 8 with `quarto render <notebook>.qmd`. `project_root: "."` resolves the root via `here::here()`.
+- **Grouping in each section:** *Dataset-specific* (match your data — the example values ship in the notebooks) · *Analysis parameters* (keep to replicate) · *I/O & structural* (standard layout).
 
 ### Reproduction checkpoints
 
@@ -51,7 +51,7 @@ so the merge degrades to LWS-only.
 
 **Analysis / QA:** `check_segment_naming: true`, `warn_on_case_variants: true`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_src: src`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_src: src`,
 `data_dir_name: Data`, `individual_readout_group_dir_name: Individual_Readout_Groups`,
 `metadata_dir_name: Metadata`, `outputs_dir_name: Outputs`,
 `clean_merge_output_dir_name: 0_Clean_And_Merge`, `cleaned_output_dir_name: Cleaned`,
@@ -100,7 +100,7 @@ Builds the `NanoStringGeoMxSet`, applies segment/probe QC and LOQ detection filt
 `pkc_file_name: ""`, `dcc_zip_name: GSE226829_RAW.zip`, `dcc_zip_names: value: []`,
 `merged_lws_metadata_file: Complete_LWS_Metadata.xlsx`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_data: Data`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_data: Data`,
 `dir_outputs: Outputs`, `dir_src: src`, `dir_dcc: DCC_Files`, `dir_pkc: PKC_Files`,
 `dir_rawdata: rawdata`, `dir_clean_merge_output: 0_Clean_And_Merge`, `out_stage: 1_QC`,
 `out_results: results`, `out_tables: tables`, `out_figures: figures`,
@@ -131,7 +131,7 @@ GeoDiff is an addition of this pipeline (not in the original analysis) — proto
 
 **Dataset-specific:** `disease_col: disease_status`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_src: src`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_src: src`,
 `dir_outputs: Outputs`, `qc_stage: 1_QC`, `qc_results_dir: results`,
 `qc_pass_rds: QC_pass_spatial_data.RDS`, `out_stage: 2_GeoDiff`, `out_results: results`,
 `save_rds: true`, `save_plots: true`
@@ -157,7 +157,7 @@ Computes Q3, TMM, negative-probe, and GeoDiff `normmat` representations.
 `meta_cols: slide: slide_name, segment: segment, annotation: segment, region: disease_status`;
 `marker_genes: ["PTPRC", "KRT8"]`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_outputs: Outputs`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_outputs: Outputs`,
 `dir_src: src`, `qc_stage: 1_QC`, `qc_results_dir: results`,
 `qc_filtered_rds: filtered_spatial_data.RDS`, `geodiff_stage: 2_GeoDiff`,
 `geodiff_results_dir: results`, `geodiff_rds: GeoDiff_spatial_data.RDS`, `out_stage: 3_Norm`,
@@ -196,7 +196,7 @@ PCA, eigencorrelation diagnostics, and `variancePartition`. Diagnostic only — 
 `pca_pairs_point_size: 0.6`, `pca_pairs_axis_label_size: 7`, `pca_pairs_component_label_size: 11`,
 `plot_prefix: ""`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_outputs: Outputs`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_outputs: Outputs`,
 `dir_src: src`, `utility_functions_r: utilityFunctions.R`, `norm_stage: 3_Norm`,
 `norm_results_dir: results`, `rds_normalised: normalised_spatial_data.RDS`,
 `rds_geodiff_norm: GeoDiff_normalised_spatial_data.RDS`, `rds_tmm_norm: TMM_normalised_spatial_data.RDS`,
@@ -235,18 +235,18 @@ analysis:** one-vs-rest on `Annotation` = `cell_type` × `disease_status`, rando
 
 **Model-input assays:** `q3_norm_assay: q_norm`, `geodiff_norm_assay: normmat`
 
-**Runtime / cache controls** (speed controls, not analysis parameters — set `true` for the exemplar run):
+**Runtime / cache controls** (speed controls, not analysis parameters — the notebooks ship `false`, which always refits; set `true` only to reuse a cache across repeat runs):
 
 | Parameter | Value | Notes |
 |---|---|---|
-| `use_dream_cache` | `true` | Load a saved identical fit if present; a fresh clone with no cache refits from scratch (identical result). |
-| `use_limma_voom_cache` | `true` | Both limma-voom branches. |
-| `use_limma_trend_cache` | `true` | Both limma-trend branches. |
+| `use_dream_cache` | `false` | Shipped default: always refit. Set `true` to load a saved identical fit if present; the result is the same either way. |
+| `use_limma_voom_cache` | `false` | Both limma-voom branches. |
+| `use_limma_trend_cache` | `false` | Both limma-trend branches. |
 
 **Dataset-specific:** `col_slide: slide_name`, `col_patient: patient_id`,
 `col_disease_status: disease_status`, `col_cell_type: cell_type`, `col_segment: segment`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_outputs: Outputs`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_outputs: Outputs`,
 `dir_src: src`, `dir_data: Data`, `geodiff_stage: 2_GeoDiff`, `geodiff_results_dir: results`,
 `geodiff_rds: GeoDiff_spatial_data.RDS`, `norm_stage: 3_Norm`, `norm_results_dir: results`,
 `norm_rds: normalised_spatial_data.RDS`, `norm_geodiff_rds: GeoDiff_normalised_spatial_data.RDS`,
@@ -291,7 +291,7 @@ summaries, and selected-method heatmaps/gene panels. Does not refit models.
 `correlation_heatmap_base_font_size: 10`, `correlation_heatmap_axis_font_size: 5`,
 `correlation_heatmap_cell_font_size: 2.4`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_outputs: Outputs`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_outputs: Outputs`,
 `dir_src: src`, `de_calc_stage: 5_DE`, `de_calc_results_dir: results`, `de_calc_results_subdir: de`,
 `de_calc_tables: tables`, `norm_stage: 3_Norm`, `norm_results_dir: results`,
 `norm_rds: normalised_spatial_data.RDS`, `norm_geodiff_rds: GeoDiff_normalised_spatial_data.RDS`,
@@ -335,7 +335,7 @@ Loaded sizes: Hallmark = 50 sets / 7,322 links; Reactome = 1,839 sets / 102,437 
 **Figure controls:** `dotplot_show_category: 15`, `fig_width_standard: 11`, `fig_height_standard: 8`,
 `fig_width_wide: 13`, `fig_height_wide: 8`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_outputs: Outputs`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_outputs: Outputs`,
 `dir_src: src`, `dir_data: Data`, `de_calc_stage: 5_DE`, `de_calc_results_dir: results`,
 `de_calc_results_subdir: de`, `out_stage: 7_Enrichment`, `out_results: results`, `out_tables: tables`,
 `out_figures: figures`, `enrichment_output_subdir: enrichment`, `comparison_output_subdir: compare`
@@ -377,7 +377,7 @@ Runs `SpatialDecon` against a cell-type reference. **Reference: `Pancreas_HCA`**
 **Figure controls:** `fig_width_standard: 11`, `fig_height_standard: 8`, `fig_width_wide: 13`,
 `fig_height_wide: 8`, `figure_dpi: 300`
 
-**I/O & structural:** `project_root: "."`, `portable_path_limit: 240`, `dir_outputs: Outputs`,
+**I/O & structural:** `project_root: "."`, `portable_path_limit: 200`, `dir_outputs: Outputs`,
 `dir_src: src`, `dir_data: Data`, `norm_stage: 3_Norm`, `norm_results_dir: results`,
 `out_stage: 8_Deconvolution`, `out_results: results`, `out_tables: tables`, `out_figures: figures`,
 `decon_output_subdir: decon`

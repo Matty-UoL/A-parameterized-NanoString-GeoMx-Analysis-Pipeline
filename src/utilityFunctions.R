@@ -95,7 +95,7 @@ read_dcc_files <- function(dir_dcc,
                            dcc_zip_name = "",
                            dcc_zip_names = NULL,
                            clean_stage = FALSE,
-                           path_limit = 240L) {
+                           path_limit = 200L) {
 
   # Ensure staging directories exist for deterministic downstream behavior.
   fs::dir_create(dir_dcc, recurse = TRUE)

@@ -47,7 +47,7 @@ Loaded sizes for this dataset: Hallmark = 50 gene sets / 7,322 gene links; React
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_outputs` / `dir_src` / `dir_data` | `Outputs` / `src` / `Data` |
 | `de_calc_stage` / `de_calc_results_dir` / `de_calc_results_subdir` | `5_DE` / `results` / `de` |
 | `out_stage` | `7_Enrichment` |

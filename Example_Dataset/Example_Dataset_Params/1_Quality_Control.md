@@ -59,7 +59,7 @@ and do not filter data.
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_data` / `dir_outputs` / `dir_src` | `Data` / `Outputs` / `src` |
 | `dir_dcc` / `dir_pkc` / `dir_rawdata` | `DCC_Files` / `PKC_Files` / `rawdata` |
 | `dir_clean_merge_output` | `0_Clean_And_Merge` |

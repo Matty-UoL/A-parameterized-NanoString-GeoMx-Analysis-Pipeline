@@ -49,13 +49,14 @@ Method × normalisation branches written: `dream_GeoDiffCounts`, `limma_voom_TMM
 
 ## Runtime / cache controls
 
-Set to `true` for the exemplar run:
+The notebooks ship `false`, which always refits. Set `true` only to reuse a cache across repeat
+runs; the result is identical either way.
 
 | Parameter | Value | Notes |
 |---|---|---|
-| `use_dream_cache` | `true` | Load a previously saved identical `dream` fit when present; on a fresh clone (no cache) it refits and saves. |
-| `use_limma_voom_cache` | `true` | Same, for both limma-voom branches. |
-| `use_limma_trend_cache` | `true` | Same, for both limma-trend branches. |
+| `use_dream_cache` | `false` | Shipped default: always refit. With `true`, a previously saved identical `dream` fit is loaded when present; on a fresh clone (no cache) it refits and saves. |
+| `use_limma_voom_cache` | `false` | Same, for both limma-voom branches. |
+| `use_limma_trend_cache` | `false` | Same, for both limma-trend branches. |
 
 > These are runtime speed controls, not analysis parameters. Cached and refit results are
 > identical (the cache stores a prior fit): a **fresh clone with no cache refits from scratch**,
@@ -78,7 +79,7 @@ Set to `true` for the exemplar run:
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_outputs` / `dir_src` / `dir_data` | `Outputs` / `src` / `Data` |
 | `geodiff_stage` / `geodiff_results_dir` / `geodiff_rds` | `2_GeoDiff` / `results` / `GeoDiff_spatial_data.RDS` |
 | `norm_stage` / `norm_results_dir` | `3_Norm` / `results` |

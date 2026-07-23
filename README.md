@@ -165,3 +165,14 @@ Rendered notebook examples may also be present in `Qmd Renders/` and `Qmd README
 - In `5_Differential_Expression_Calculation.qmd`, fixed-effect covariates are typed explicitly. Put numeric variables such as `age` in `model_covariates_continuous` and group variables such as `sex`, `slide_name`, or `batch` in `model_covariates_categorical`; confirm numeric covariates are numeric in metadata before Stage 5.
 - Machine-specific library setup snippets have been removed from the DE notebooks. Configure R libraries through the active R environment rather than notebook-local setup code.
 - For a clean verification pass, render notebooks `0` through `8` in order and confirm there are no unreviewed warnings or missing output files.
+
+## License and Citation
+
+This repository is licensed under the Creative Commons Attribution 4.0 International licence
+(CC BY 4.0); see [`LICENSE`](LICENSE). If you use it, please cite the archived release via the
+concept DOI [10.5281/zenodo.21163241](https://doi.org/10.5281/zenodo.21163241), which always
+resolves to the latest version. Citation metadata is in [`CITATION.cff`](CITATION.cff).
+
+Third-party material is not covered by that licence: the bundled example data is from NCBI GEO
+accession GSE226829, and the spatial deconvolution reference is redistributed from the NanoString
+Biostats CellProfileLibrary. See [`NOTICE`](NOTICE) for details, and cite the original sources.

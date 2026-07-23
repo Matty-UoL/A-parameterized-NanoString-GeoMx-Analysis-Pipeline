@@ -4,9 +4,9 @@ This folder records the **exact `params:` values** used to produce the worked-ex
 renders shipped with this protocol, so a reviewer can reproduce the analysis on their
 own machine. Each file documents one notebook's YAML front matter.
 
-The published notebooks ship with dataset-specific values (input filenames, metadata
-column names) cleared for reuse. Use the files here to restore the values that produced
-the example HTML renders.
+The published notebooks ship with the GSE226829 values already in place, so the example
+renders reproduce without editing the YAML. Use the files here as the authoritative record
+of those values, and as the starting point when adapting the workflow to your own data.
 
 ## Dataset
 
@@ -15,12 +15,41 @@ the example HTML renders.
 
 ## How to reproduce
 
-1. Place the pipeline notebooks and `render_full_pipeline_timing.R` at the project root.
-2. Put the inputs under `Data/` (DCC zip, PKC, segment-annotation LWS) and helpers under `src/`; outputs are written to `Outputs/`.
-3. In each notebook's YAML, set the `params:` to the values listed here (or override individually with `quarto render <notebook>.qmd -P key:value`).
-4. Render in stage order (0 → 8), e.g. `Rscript render_full_pipeline_timing.R`.
+1. Clone the repository to a **short path** (for example `C:\R\gmx`). The notebooks enforce a
+   200-character path budget, so a deeply nested project root will stop the run early.
+2. Inputs live under `Example_Dataset/Data/` (DCC zip, PKC, segment-annotation LWS) and helpers
+   under `src/`; outputs are written to `Example_Dataset/Outputs/`.
+3. The GSE226829 values are already set in each notebook's YAML — no editing is required to
+   reproduce the shipped renders. Only the **path** parameters need pointing at the bundled
+   example, which is done on the command line so the notebooks keep their generic defaults.
+4. Render in stage order 0 → 8. Each stage reads the previous stage's outputs, so order matters.
 
-`project_root: "."` resolves the project root via `here::here()`, so the notebooks find `Data/`, `src/`, and `Outputs/` relative to the repo root.
+   Stage 0 takes `data_dir_name` / `outputs_dir_name`:
+
+   ```bash
+   quarto render 0_Clean_Up_Merge_LWS_Metadata.qmd \
+     -P data_dir_name:Example_Dataset/Data \
+     -P outputs_dir_name:Example_Dataset/Outputs
+   ```
+
+   Stages 1, 5, 7 and 8 read the raw data, so they take both `dir_data` and `dir_outputs`:
+
+   ```bash
+   quarto render 1_Quality_Control.qmd \
+     -P dir_data:Example_Dataset/Data \
+     -P dir_outputs:Example_Dataset/Outputs
+   ```
+
+   Stages 2, 3, 4 and 6 only read earlier stage outputs, so they take `dir_outputs` alone.
+   Passing a parameter a notebook does not declare will stop the render.
+
+   ```bash
+   quarto render 2_GeoDiff_Processing.qmd -P dir_outputs:Example_Dataset/Outputs
+   ```
+
+`project_root: "."` resolves the project root via `here::here()`, so the notebooks find `Data/`,
+`src/`, and `Outputs/` relative to the repo root. To run against your own data instead, copy the
+`Data/` layout to your project root and drop the `-P` overrides.
 
 ## Expected checkpoints (sanity checks)
 

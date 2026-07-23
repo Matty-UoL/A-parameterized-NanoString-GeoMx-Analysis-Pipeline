@@ -62,7 +62,7 @@ summaries, and selected-method heatmaps and gene panels. It does **not** refit D
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_outputs` / `dir_src` | `Outputs` / `src` |
 | `de_calc_stage` / `de_calc_results_dir` / `de_calc_results_subdir` / `de_calc_tables` | `5_DE` / `results` / `de` / `tables` |
 | `norm_stage` / `norm_results_dir` | `3_Norm` / `results` |

@@ -59,7 +59,7 @@ proportion / beta heatmaps.
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_outputs` / `dir_src` / `dir_data` | `Outputs` / `src` / `Data` |
 | `norm_stage` / `norm_results_dir` | `3_Norm` / `results` |
 | `out_stage` | `8_Deconvolution` |

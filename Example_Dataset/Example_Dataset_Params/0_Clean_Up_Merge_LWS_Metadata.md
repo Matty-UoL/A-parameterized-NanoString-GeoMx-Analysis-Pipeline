@@ -30,7 +30,7 @@ merge step degrades gracefully to an LWS-only output.
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_src` | `src` |
 | `data_dir_name` | `Data` |
 | `individual_readout_group_dir_name` | `Individual_Readout_Groups` |

@@ -30,7 +30,7 @@ consumed by stages 4–8.
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_outputs` / `dir_src` | `Outputs` / `src` |
 | `qc_stage` / `qc_results_dir` / `qc_filtered_rds` | `1_QC` / `results` / `filtered_spatial_data.RDS` |
 | `geodiff_stage` / `geodiff_results_dir` / `geodiff_rds` | `2_GeoDiff` / `results` / `GeoDiff_spatial_data.RDS` |

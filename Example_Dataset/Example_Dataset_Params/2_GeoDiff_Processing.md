@@ -34,7 +34,7 @@ so these are the protocol defaults rather than paper-matched values.
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_src` / `dir_outputs` | `src` / `Outputs` |
 | `qc_stage` | `1_QC` |
 | `qc_results_dir` | `results` |

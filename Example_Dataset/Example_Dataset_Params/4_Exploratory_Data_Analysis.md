@@ -45,7 +45,7 @@ normalised objects. It is diagnostic only — nothing here feeds the DE calculat
 | Parameter | Value |
 |---|---|
 | `project_root` | `.` |
-| `portable_path_limit` | `240` |
+| `portable_path_limit` | `200` |
 | `dir_outputs` / `dir_src` | `Outputs` / `src` |
 | `utility_functions_r` | `utilityFunctions.R` |
 | `norm_stage` / `norm_results_dir` | `3_Norm` / `results` |
