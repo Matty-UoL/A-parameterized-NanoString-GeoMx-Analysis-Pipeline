@@ -1,0 +1,2897 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "5 Differential Expression Calculation (limma-trend, limma-voom, dream)"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+
+params:
+
+
+  # Project paths and shared folders
+
+  # Root and shared folder names (aligned with 0-4 notebooks)
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+  dir_outputs: "Outputs"
+  dir_src: "src"
+  dir_data: "Data"
+
+
+  # Inputs from earlier stages
+
+  # Earlier stage locations
+  geodiff_stage: "2_GeoDiff"
+  geodiff_results_dir: "results"
+  geodiff_rds: "GeoDiff_spatial_data.RDS"
+
+  norm_stage: "3_Norm"
+  norm_results_dir: "results"
+  norm_rds: "normalised_spatial_data.RDS"
+  norm_geodiff_rds: "GeoDiff_normalised_spatial_data.RDS"
+  norm_tmm_rds: "TMM_normalised_spatial_data.RDS"
+
+
+  # Differential-expression stage outputs
+
+
+  # DE stage output structure
+  out_stage: "5_DE"
+  out_results: "results"
+  out_tables: "tables"
+  out_figures: "figures"
+  de_results_subdir: "de"
+  de_figures_subdir: "de"
+
+
+  # Statistical scope, contrast selection, and significance settings
+
+  # Main metadata column used for DE contrasts.
+  # Default "Annotation" uses the generated fallback group:
+  # <cell_type>_<disease_status>, for example Acinar_Healthy.
+  # To test an existing metadata column, set this to that exact column name,
+  # for example "disease_celltype", "condition", or "treatment_group".
+  contrast_factor: "Annotation"
+
+  # Contrast specification file.
+  # Place user contrast files in Data/ and provide the filename here,
+  # for example Data/contrasts.txt -> contrast_file: "contrasts.txt".
+  # Leave this blank when model_mode is "one_vs_rest_mixed" to auto-generate
+  # one-vs-rest contrasts from observed contrast_factor groups.
+  contrast_file: ""
+
+  # Contrast execution mode.
+  # - one_vs_rest_mixed: broad screening; auto-generates contrasts when contrast_file is blank.
+  #   This is useful for exemplar runs, but is not the preferred primary analysis mode.
+  # - pairwise_mixed: preferred for planned biological comparisons; requires explicit
+  #   contrast_file rows (factor/numerator/denominator).
+  # For pairwise_mixed, each factor value must match contrast_factor exactly.
+  model_mode: "one_vs_rest_mixed"
+
+  # Differential expression significance thresholds
+  adj_p_cutoff: 0.05
+  logFC_cutoff: 0.58
+
+  # Reproducibility
+  seed: 123
+
+
+  # Metadata mapping (edit these first when adapting to new datasets)
+
+  # Metadata columns for the example dataset.
+  # Missing-column behavior: if any requested column is missing, the notebook will
+  # attempt sensible fallback columns; if none exist, it creates a placeholder
+  # column and continues with an explicit warning for protocol users.
+  col_slide: "slide_name"
+  col_patient: "patient_id"
+  col_disease_status: "disease_status"
+  col_cell_type: "cell_type"
+  col_segment: "segment"
+
+
+  # Method selection options
+
+  # Explicit model-input assay controls.
+  # Q3 normalization and GeoDiff-normalized values are stored as separate assay elements in stage 3;
+  # keep these names aligned with 3_Normalisation.qmd.
+  q3_norm_assay: "q_norm"
+  geodiff_norm_assay: "normmat"
+  limma_trend_prior_count: 1
+
+  # Method-selection notes for this protocol workflow.
+  # Valid values: "limma-trend", "limma-voom", "dream"
+  # Example: run only limma-trend -> de_methods: ["limma-trend"]
+  # Example: run limma-trend + dream -> de_methods: ["limma-trend", "dream"]
+  # Keep this list explicit so manuscript runs remain reproducible.
+  de_methods: ["limma-trend", "limma-voom", "dream"]
+
+  # Supported model settings
+  
+  # Random-effect configuration.
+  # Uses grouping_id by default when repeated segments should be grouped by more than one
+  # metadata column, usually patient and anatomical/location fields.
+  # Set to "patient_id" if patient-level random intercepts are sufficient.
+  random_effect_var: "grouping_id"
+
+  # Optional fixed-effect covariates for all selected DE models.
+  # Use the two typed lists below so continuous variables are not accidentally
+  # modeled as categorical factors.
+  #
+  # Continuous covariates:
+  # - Use for numeric adjustment variables such as age, ischemic time, RIN, or
+  #   another measured quantity where one numeric model coefficient is intended.
+  # - The metadata column should already contain numeric values before Stage 5.
+  #   If age is stored as text such as "45 years", "unknown", or mixed numeric
+  #   and non-numeric entries, clean the metadata in an earlier stage and rerun stages so the
+  #   value entering this notebook is numeric and auditable.
+  # - Example:
+  #   model_covariates_continuous:
+  #     value: ["age"]
+  # - Leave value: [] when no continuous adjustment covariates are required.
+  model_covariates_continuous:
+    value: []
+
+  # Categorical covariates:
+  # - Use for group-like adjustment variables such as sex, slide_name, batch, or
+  #   operator where separate factor levels should be estimated by the model.
+  # - These columns are converted to factors for model fitting.
+  # - Example:
+  #   model_covariates_categorical:
+  #     value: ["sex", "slide_name"]
+  # - Leave value: [] when no categorical adjustment covariates are required.
+  model_covariates_categorical:
+    value: []
+
+  # Columns used to build grouping_id via paste(..., sep = "_").
+  # Must match metadata column names exactly (case-sensitive).
+  grouping_id_vars: ["patient_id", "location"]
+
+  # Attempt random slope in dream where stable; otherwise fall back to random intercept.
+  allow_random_slope: false
+
+  # Low-power diagnostics and optional exclusion controls
+  min_samples_per_group: 2
+  min_patients_per_group: ""
+  auto_exclude_low_power: true
+
+
+  # Runtime/cache controls
+  
+  # Dream runtime control
+  use_dream_cache: false
+
+  # limma runtime controls (method-level cache toggles).
+  # Purpose:
+  # - Speeds up iterative troubleshooting by reusing previously saved limma outputs
+  #   when the same method branch has already completed.
+  # How to use:
+  # - false (default): always refit limma models (reproducibility-first behaviour).
+  # - true: load existing method cache from out_results_de if valid; otherwise refit
+  #   and overwrite cache with the newly computed results.
+  use_limma_voom_cache: false
+  use_limma_trend_cache: false
+---
+
+```{=html}
+<style>
+:root,
+body,
+body * {
+  font-family: "Segoe UI", Arial, sans-serif !important;
+}
+
+pre,
+code,
+kbd,
+samp,
+.sourceCode,
+.sourceCode * {
+  font-family: "Segoe UI", Arial, sans-serif !important;
+}
+</style>
+```
+
+# Differential expression analysis (5)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook is written for users applying the workflow to their own dataset. Read each section in order, confirm required inputs before running code sections, and use the YAML parameters at the top of the file to adapt paths and thresholds for your study design.
+:::
+
+::: {.callout-warning collapse="true"}
+## Before you run
+Validate input data and metadata column names first. Most runtime issues in protocol use are caused by path mismatches, missing files, or dataset-specific column naming differences.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+::: {.callout-caution collapse="true"}
+## Reproducibility caution
+When editing parameters, record exactly what changed (paths, thresholds, model options) in your run notes so later figures and conclusions can be reproduced during review and publication.
+:::
+
+This notebook is the **calculation-only** component of the DE workflow. It performs model fitting, exports contrast-level result tables/statistics, and writes result files read by the companion visualisation notebook (`6_Differential_Expression_Visualisation.qmd`).
+
+The protocol-supported method set in this stage is: **limma-trend**, **limma-voom**, and **dream**. These are the only DE engines treated as publication-path defaults in this notebook.
+
+::: {.callout-note collapse="true"}
+## YAML parameter order guide (5)
+To make adaptation easier for new users, parameters are grouped in execution order:
+
+1. Project paths and shared folders.
+2. Input locations from earlier stages.
+3. Stage output folders.
+4. Statistical thresholds and contrast controls.
+5. Metadata mappings (`col_*` values for your dataset).
+6. Method/enrichment options.
+7. Supported model settings.
+8. Runtime/cache controls.
+:::
+
+## Supported DE methods in this protocol
+
+- **limma-trend** (default linear model with empirical Bayes moderation).
+- **limma-voom** (for count-like inputs where mean-variance modelling is desirable).
+- **dream** (mixed-model option retained for richer random-effect modelling output).
+
+::: {.callout-important}
+## Model-input discipline
+Each DE branch uses an explicit assay and transformation before model fitting. `limma-trend_Q3` uses the stage 3 Q3 assay after log2 transformation with a small prior count, `limma-trend_GeoDiff` uses the GeoDiff `normmat` assay directly, and voom branches use count-like matrices with TMM scaling factors. Review the model input check later in this notebook before interpreting any DE result.
+:::
+
+::: {.callout-note}
+## Why the GeoDiff limma inputs differ
+Both methods use limma, but they are not given the same input.
+
+`limma-voom` works from count-like data so it can estimate mean-variance weights before model fitting. Therefore, `limma_voom_GeoDiff` uses the GeoDiff-filtered count object (`GeoDiff_spatial_data.RDS`).
+
+`limma-trend` is used with data that has already been normalized and put on a log-like scale. For that reason, `limma_trend_GeoDiff` uses the GeoDiff-normalized `normmat` data from `GeoDiff_normalised_spatial_data.RDS`.
+:::
+
+## Supported model choices
+
+- This notebook supports **random-intercept models** as the default mixed-model design.
+- The random effect is controlled by `params$random_effect_var` and can be left blank.
+- If your design needs nested/random slopes or multiple high-dimensional random effects, this notebook intentionally does not support that.
+
+> **When to keep the model simple:**
+> If you have limited RAM/CPU or many contrasts with many samples, prefer **limma-trend** first. Keep **dream** for targeted follow-up where richer mixed-model output is essential.
+
+## What runs in this notebook (and what does not)
+
+- **Runs in stage 5 (calculation):** model fitting, contrast-level DE statistics, DE gene extraction, diagnostics, and structured result-file export.
+- **Does not run in stage 5:** interpretation figures (volcano panels, heatmaps, correlation plots, enrichment comparison plots).
+- **Where figures are generated:** `6_Differential_Expression_Visualisation.qmd`.
+
+## Model specification options
+
+By default, DE models use the generated `Annotation` group as the contrast factor, but this is a fallback rather than a requirement.
+Set `params$contrast_factor` to any metadata column that should define the biological groups being compared.
+Internally the selected factor is copied to `DE_Group`, so limma and dream use one consistent model column across all normalization objects.
+You can optionally add adjustment covariates via typed YAML lists:
+
+- `params$model_covariates_continuous` for numeric covariates such as `age`.
+- `params$model_covariates_categorical` for factor covariates such as `sex`, `slide_name`, or `batch`.
+
+::: {.callout-note}
+## Separate `cell_type` and `disease_status` columns are not required
+The fallback `Annotation` group (composed as `<cell_type>_<disease_status>`) is built and
+used **only** when `params$contrast_factor` is left at its default value `"Annotation"` —
+this is the exemplar configuration for the bundled dataset. If you set `contrast_factor`
+to any existing metadata column (for example a single combined segment/condition column),
+that column defines the comparison directly and the separate `col_cell_type` /
+`col_disease_status` columns are optional: where they are absent the notebook falls back to
+sensible placeholders and continues. In other words, your project does **not** need to carry
+distinct cell-type and segment columns to use this workflow.
+:::
+
+::: {.callout-warning}
+## Prefer planned pairwise contrasts for primary comparisons
+Use `model_mode: "pairwise_mixed"` with an explicit contrast file for planned biological comparisons whenever the study question is naturally pairwise. The `one_vs_rest_mixed` mode is useful for broad screening and for the exemplar dataset because it can automatically generate contrasts, but it is usually not the best primary inferential choice.
+
+By averaging diverse groups into a single baseline, one-vs-rest contrasts can mask true differences and allow a single outlier group to skew the result. If a one-vs-rest screen identifies a signal, follow up with biologically meaningful pairwise contrasts before carrying results into interpretation or enrichment.
+:::
+
+::: {.callout-warning}
+## Covariate information
+When covariates are provided, this notebook validates all requested columns before model fitting. Execution stops with a clear error if any covariate is missing, contains missing values, has only one observed value after filtering, or cannot be encoded as the requested type.
+
+Continuous covariates are modeled as numeric terms. Before Stage 5, confirm that columns such as `age` are numeric in the metadata produced by the earlier stages. If an age column contains text values or mixed encodings, correct the metadata in an earlier stage and rerun the staged workflow so the numeric value entering Stage 5 is reproducible.
+:::
+
+::: {.callout-note collapse="true"}
+## Common configuration examples
+Default model (recommended starting point):
+
+```yaml
+model_covariates_continuous:
+  value: []
+model_covariates_categorical:
+  value: []
+```
+
+Add biological/technical adjustment terms:
+
+```yaml
+model_covariates_continuous:
+  value: ["age"]
+model_covariates_categorical:
+  value: ["sex", "slide_name"]
+```
+
+These covariates are added to the fixed-effect model formula for limma-trend, limma-voom, and dream while preserving the selected contrast factor and the one-vs-rest / pairwise contrast system.
+:::
+
+
+## How to interpret this stage
+
+Use this stage to make explicit, reproducible decisions before progressing:
+
+1. Confirm the key output objects/tables were produced without unexpected warnings.
+2. Review the stage figures in the context of your study design (technical quality, group balance, and model assumptions).
+3. Record your decision in run notes (for example: "acceptable", "rerun with adjusted parameters", or "exclude affected samples/groups") before moving to the next notebook.
+
+::: {.callout-note}
+## Abbreviation glossary used across stages 5 and 6
+This glossary is included so users can interpret model outputs and later figures without prior project context.
+
+- **DE**: Differential expression.
+- **FC**: Fold change (effect size).
+- **FDR**: False discovery rate (multiple-testing adjusted p-value).
+- **Q3**: Third-quartile normalisation.
+- **TMM**: Trimmed mean of M-values normalisation.
+:::
+
+## Load libraries
+
+```{r}
+#| output: false
+# startup package warnings are expected and do not affect protocol runs.
+#| warning: false
+#| message: false
+
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(tidyverse)
+library(factoextra)
+library(reshape2)
+library(pheatmap)
+library(writexl)
+library(ggrepel)
+library(edgeR)
+library(limma)
+library(statmod)
+library(variancePartition)
+library(janitor)
+library(VennDiagram)
+library(cowplot)
+library(doParallel)
+library(lme4)
+library(RColorBrewer)
+library(wesanderson)
+library(randomcoloR)
+library(SummarizedExperiment)
+library(fs)
+library(clusterProfiler)
+```
+
+```{r}
+#| label: package-preflight
+#| include: false
+
+required_pkgs <- c(
+  "NanoStringNCTools", "GeomxTools", "GeoMxWorkflows", "tidyverse",
+  "factoextra", "reshape2", "pheatmap", "writexl", "ggrepel", "edgeR",
+  "limma", "statmod", "variancePartition", "janitor", "VennDiagram",
+  "cowplot", "doParallel", "lme4", "RColorBrewer", "wesanderson", "randomcoloR",
+  "SummarizedExperiment", "fs", "viridis", "ggplot2",
+  "dplyr", "BiocParallel", "clusterProfiler"
+)
+
+missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_pkgs) > 0) {
+  stop("Missing packages: ", paste(missing_pkgs, collapse = ", "), call. = FALSE)
+}
+invisible(lapply(required_pkgs, library, character.only = TRUE))
+```
+
+```{r}
+#| label: reproducibility-seed
+#| include: false
+
+set.seed(params$seed)
+```
+
+```{r}
+#| label: method-toggle-guard
+#| include: false
+#| message: true
+# this guard suppresses known non-critical warnings for cleaner failure messages.
+#| warning: false
+
+# Validate method toggles early so the notebook fails fast with a clear message
+# instead of surfacing configuration problems deep inside model-fit code sections.
+supported_methods <- c("limma-trend", "limma-voom", "dream")
+requested_methods <- unique(params$de_methods)
+unknown_methods <- setdiff(requested_methods, supported_methods)
+
+if (length(unknown_methods) > 0) {
+  stop(
+    sprintf(
+      "Unsupported de_methods value(s): %s. Supported values are: %s.",
+      paste(unknown_methods, collapse = ", "),
+      paste(supported_methods, collapse = ", ")
+    ),
+    call. = FALSE
+  )
+}
+
+if (length(requested_methods) == 0) {
+  stop(
+    "No DE methods selected. Set params$de_methods to one or more of: limma-trend, limma-voom, dream.",
+    call. = FALSE
+  )
+}
+
+message("Validated DE methods for this run: ", paste(requested_methods, collapse = ", "))
+message("To run a subset, set params$de_methods in YAML (for example ['limma-trend'] or ['limma-trend', 'dream']).")
+```
+
+## Setup paths and load stage inputs
+
+```{r}
+#| label: setup-paths
+#| message: false
+#| warning: false
+# path setup can emit benign environment warnings; suppress by protocol design.
+
+root <- params$project_root
+if (is.null(root) || root == "" || root == ".") {
+  # YAML-aware fallback: use repository root discovered via here().
+  root <- path_abs(here::here())
+} else {
+  root <- path_abs(root)
+}
+
+# here()-first helper with explicit YAML-root override when provided.
+root_via_here <- path_abs(here::here())
+use_here_root <- identical(path_abs(root), root_via_here)
+project_path <- function(...) {
+  if (use_here_root) {
+    here::here(...)
+  } else {
+    path(root, ...)
+  }
+}
+
+# Resolve shared source directory from the project-level src folder.
+dir_src <- project_path(params$dir_src)
+dir_data <- project_path(params$dir_data)
+path_utilities_path <- path(dir_src, "pathUtilities.R")
+if (!file_exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+
+geodiff_input_path <- project_path(params$dir_outputs, params$geodiff_stage, params$geodiff_results_dir, params$geodiff_rds)
+norm_input_path <- project_path(params$dir_outputs, params$norm_stage, params$norm_results_dir, params$norm_rds)
+norm_geodiff_input_path <- project_path(params$dir_outputs, params$norm_stage, params$norm_results_dir, params$norm_geodiff_rds)
+norm_tmm_input_path <- project_path(params$dir_outputs, params$norm_stage, params$norm_results_dir, params$norm_tmm_rds)
+
+# Contrast file resolution. Contrast tables are user analysis inputs, so the
+# default lookup location is Data/ rather than src/.
+contrast_file_path <- NA_character_
+if (!is.null(params$contrast_file) && nzchar(params$contrast_file)) {
+  contrast_file_candidates <- c(
+    path(dir_data, params$contrast_file),
+    project_path(params$contrast_file)
+  )
+  contrast_file_path <- contrast_file_candidates[file_exists(contrast_file_candidates)][1]
+  if (is.na(contrast_file_path) && identical(params$model_mode, "pairwise_mixed")) {
+    stop(
+      "Contrast file not found. Checked: ",
+      paste(contrast_file_candidates, collapse = " ; "),
+      ". Place the file in Data/ and set params$contrast_file to its filename, or provide an explicit project-relative path.",
+      call. = FALSE
+    )
+  }
+} else if (identical(params$model_mode, "pairwise_mixed")) {
+  stop(
+    "params$model_mode is 'pairwise_mixed', but params$contrast_file is blank. ",
+    "Place a contrast file in Data/ and set params$contrast_file to the filename.",
+    call. = FALSE
+  )
+}
+
+out_base <- project_path(params$dir_outputs, params$out_stage)
+out_results <- path(out_base, params$out_results)
+out_tables <- path(out_base, params$out_tables)
+out_figures <- path(out_base, params$out_figures)
+
+out_results_de <- path(out_results, params$de_results_subdir)
+out_figures_de <- path(out_figures, params$de_figures_subdir)
+legacy_out_results_de <- path(out_results, "differential_expression")
+
+stage5_contract_paths <- c(
+  protocol_contract_path(out_results_de, "dream_results.RDS", portable_path_limit, "Stage 5 dream result"),
+  protocol_contract_path(out_results_de, "limma_voom_GeoDiff_results.RDS", portable_path_limit, "Stage 5 limma-voom result"),
+  protocol_contract_path(out_results_de, "limma_trend_GeoDiff_results.RDS", portable_path_limit, "Stage 5 limma-trend result")
+)
+stage5_path_audit <- protocol_path_audit(
+  c(
+    "GeoDiff input" = geodiff_input_path,
+    "Q3 normalized input" = norm_input_path,
+    "TMM normalized input" = norm_tmm_input_path,
+    stats::setNames(stage5_contract_paths, paste0("DE contract ", seq_along(stage5_contract_paths))),
+    "DE figure directory" = out_figures_de
+  ),
+  portable_path_limit
+)
+protocol_assert_audit(stage5_path_audit, portable_path_limit)
+knitr::kable(stage5_path_audit, caption = "Stage 5 path-portability audit")
+
+walk(list(out_results_de, out_tables, out_figures_de), dir_create, recurse = TRUE)
+
+# Preserve reuse of existing Stage 5 caches without continuing to write to the
+# legacy long directory.
+legacy_cache_names <- c(
+  "dream_results.RDS",
+  "limma_voom_TMM_results.RDS",
+  "limma_voom_GeoDiff_results.RDS",
+  "limma_trend_Q3_results.RDS",
+  "limma_trend_GeoDiff_results.RDS"
+)
+cache_reuse_requested <- any(c(
+  isTRUE(params$use_dream_cache),
+  isTRUE(params$use_limma_voom_cache),
+  isTRUE(params$use_limma_trend_cache)
+))
+if (cache_reuse_requested && dir_exists(legacy_out_results_de)) {
+  for (cache_name in legacy_cache_names) {
+    compact_cache <- path(out_results_de, cache_name)
+    legacy_cache <- path(legacy_out_results_de, cache_name)
+    if (!file_exists(compact_cache) && file_exists(legacy_cache)) {
+      file.copy(legacy_cache, compact_cache, overwrite = FALSE)
+      message("Copied legacy Stage 5 cache into the compact output directory: ", cache_name)
+    }
+  }
+}
+
+# Suppress package-version warnings from shared helper sourcing
+# so the setup section remains focused on path and input validation.
+utility_functions_path <- path(dir_src, "utilityFunctions.R")
+if (!file_exists(utility_functions_path)) {
+  stop(
+    "Required helper file not found: ", utility_functions_path,
+    ". Set params$project_root to the project root and params$dir_src to the helper directory name, usually 'src'.",
+    call. = FALSE
+  )
+}
+suppressPackageStartupMessages(suppressWarnings(source(utility_functions_path)))
+```
+
+### Random-effect modeling diagnostic
+
+This diagnostic records the random-intercept setting declared in the YAML before model fitting begins.
+Confirm that the selected column identifies the repeated or matched segment unit for your study design; if no column is declared, later-stage models run without random-intercept correction.
+
+```{r}
+#| label: random-effect-diagnostic
+#| echo: false
+#| message: true
+#| warning: false
+
+random_effect_value <- if (is.null(params$random_effect_var)) {
+  ""
+} else {
+  trimws(as.character(params$random_effect_var[1]))
+}
+
+random_effect_selected <- nzchar(random_effect_value)
+
+if (random_effect_selected) {
+  message("random_effect_var provided: ", random_effect_value)
+} else {
+  message("No random_effect_var provided; models will run without random-intercept correction.")
+}
+
+random_effect_diagnostic <- tibble::tibble(
+  Setting = c("YAML parameter", "Model behavior", "User check"),
+  Value = c(
+    ifelse(random_effect_selected, random_effect_value, "None"),
+    ifelse(
+      random_effect_selected,
+      "Use this metadata column for random-intercept correction where supported.",
+      "Run models without random-intercept correction."
+    ),
+    ifelse(
+      random_effect_selected,
+      "Confirm this column exists after metadata preparation and represents the intended repeated-measures unit.",
+      "Confirm that independent-segment modeling is appropriate for this study design."
+    )
+  )
+)
+
+knitr::kable(
+  random_effect_diagnostic,
+  caption = "Random-effect configuration declared for this Stage 5 run."
+)
+```
+
+The helper section below defines all reusable utilities for this notebook.
+These functions are intentionally grouped in one place so readers can inspect the full data-preparation and model-support logic before any DE model is run.
+
+```{r}
+#| label: helpers
+#| message: false
+# helper registration may trigger incidental package warnings not relevant to analysis logic.
+#| warning: false
+
+sanitize_col_name <- function(x, default_name) {
+  if (is.null(x) || !nzchar(trimws(as.character(x)))) return(default_name)
+  trimws(as.character(x))
+}
+
+col_slide <- sanitize_col_name(params$col_slide, "slide_name")
+col_patient <- sanitize_col_name(params$col_patient, "patient_id")
+col_disease <- sanitize_col_name(params$col_disease_status, "disease_status")
+col_cell_type <- sanitize_col_name(params$col_cell_type, "cell_type")
+col_segment <- sanitize_col_name(params$col_segment, "segment")
+contrast_factor <- sanitize_col_name(params$contrast_factor, "Annotation")
+model_group_col <- "DE_Group"
+
+render_protocol_kable <- function(.data, caption, ...) {
+  table_text <- suppressWarnings(knitr::kable(.data, caption = caption, ...))
+  knitr::asis_output(paste(as.character(table_text), collapse = "\n"))
+}
+
+ensure_metadata_column <- function(pd, target_col, candidate_cols, default_value, label_text) {
+  if (target_col %in% colnames(pd)) return(pd)
+
+  candidate_hit <- candidate_cols[candidate_cols %in% colnames(pd)]
+  if (length(candidate_hit) > 0) {
+    pd[[target_col]] <- pd[[candidate_hit[1]]]
+    warning(
+      "Requested ", label_text, " column '", target_col, "' was not found. ",
+      "Using fallback column '", candidate_hit[1], "' copied into '", target_col, "'."
+    )
+    return(pd)
+  }
+
+  pd[[target_col]] <- default_value
+  warning(
+    "Requested ", label_text, " column '", target_col, "' was not found and no fallback column matched. ",
+    "Created placeholder column '", target_col, "' for protocol continuity."
+  )
+  pd
+}
+
+# Standardize disease labels so Annotation construction is stable across datasets.
+normalize_disease_labels <- function(x) {
+  x <- as.character(x)
+  x <- stringr::str_trim(x)
+  x_low <- stringr::str_to_lower(x)
+  dplyr::case_when(
+    x_low %in% c("healthy", "normal") ~ "Healthy",
+    x_low %in% c("tumour", "tumor", "disease") ~ "Tumor",
+    TRUE ~ stringr::str_to_title(x)
+  )
+}
+
+# Build consistent sample metadata, create the fallback Annotation group, and
+# Sanitise group labels for modeling with make.names(), but abort if two distinct
+# input labels collapse to the same sanitised name. Without this, values such as
+# "CD4+ T" and "CD4 T" both become "CD4..T" and are silently pooled into one DE
+# group, corrupting the comparison.
+make_group_names_checked <- function(x, what = "group label") {
+  x <- as.character(x)
+  sanitized <- make.names(x)
+  collapsed <- tapply(x, sanitized, function(vals) length(unique(vals)) > 1)
+  if (any(collapsed)) {
+    bad <- names(collapsed)[collapsed]
+    detail <- vapply(bad, function(nm) {
+      paste0(nm, " <- {", paste(sort(unique(x[sanitized == nm])), collapse = ", "), "}")
+    }, character(1))
+    stop(
+      "make.names() collapsed distinct ", what, " values into the same modeling name, ",
+      "which would silently pool different groups:\n  ", paste(detail, collapse = "\n  "),
+      "\nRename these values in the metadata so they stay distinct after sanitization.",
+      call. = FALSE
+    )
+  }
+  sanitized
+}
+
+# copy the configured contrast factor into DE_Group for modeling.
+prepare_metadata <- function(obj, contrast_factor_col = contrast_factor, model_group = model_group_col) {
+  pd <- get_pheno(obj)
+
+  pd <- ensure_metadata_column(
+    pd, col_slide, c("slide_name", "slide", "Slide"),
+    default_value = "slide_1", label_text = "slide"
+  )
+  pd <- ensure_metadata_column(
+    pd, col_patient, c("patient_id", "patient", "PatientID"),
+    default_value = rownames(pd), label_text = "patient"
+  )
+  pd <- ensure_metadata_column(
+    pd, col_disease, c("disease_status", "disease", "condition", "status"),
+    default_value = "UnknownDisease", label_text = "disease status"
+  )
+  pd <- ensure_metadata_column(
+    pd, col_cell_type, c("cell_type", "celltype", "annotation", "segment"),
+    default_value = "UnknownCellType", label_text = "cell type"
+  )
+  pd <- ensure_metadata_column(
+    pd, col_segment, c("segment", "annotation", "region"),
+    default_value = rownames(pd), label_text = "segment"
+  )
+
+  pd[[col_disease]] <- normalize_disease_labels(pd[[col_disease]])
+  pd$Annotation <- make_group_names_checked(
+    paste0(pd[[col_cell_type]], "_", pd[[col_disease]]),
+    "Annotation (cell type _ disease status)"
+  )
+
+  if (!(contrast_factor_col %in% colnames(pd))) {
+    stop(
+      sprintf(
+        "contrast_factor '%s' was not found in metadata after fallback Annotation construction. Available metadata columns are: %s.",
+        contrast_factor_col,
+        paste(sort(colnames(pd)), collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+
+  contrast_values <- trimws(as.character(pd[[contrast_factor_col]]))
+  missing_contrast_values <- is.na(contrast_values) | contrast_values == ""
+  if (any(missing_contrast_values)) {
+    stop(
+      sprintf(
+        "contrast_factor '%s' contains %d missing or blank value(s). Fill or remove these samples before running DE.",
+        contrast_factor_col,
+        sum(missing_contrast_values)
+      ),
+      call. = FALSE
+    )
+  }
+
+  pd[[model_group]] <- make_group_names_checked(
+    contrast_values,
+    paste0("contrast factor '", contrast_factor_col, "'")
+  )
+
+  set_pheno(obj, pd)
+}
+
+# Optional helper to drop low-power DE groups from an object.
+remove_low_power_groups <- function(obj, low_power_groups = character(), group_col = model_group_col) {
+  if (length(low_power_groups) == 0) return(obj)
+  pd <- get_pheno(obj)
+  if (!(group_col %in% colnames(pd))) {
+    stop("Cannot remove low-power groups because modeling column is missing: ", group_col, call. = FALSE)
+  }
+  bad <- make.names(as.character(low_power_groups))
+  keep <- !(pd[[group_col]] %in% bad)
+  if (any(!keep)) {
+    message("Dropping low-power DE group(s): ", paste(sort(unique(pd[[group_col]][!keep])), collapse = ", "))
+  }
+  subset_samples(obj, keep)
+}
+
+eligible_group_levels <- function(pd, group_col = model_group_col, min_group_n = 2) {
+  if (!(group_col %in% colnames(pd))) {
+    stop("Cannot determine eligible DE groups because modeling column is missing: ", group_col, call. = FALSE)
+  }
+  pd2 <- as.data.frame(pd)
+  pd2[[group_col]] <- make.names(as.character(pd2[[group_col]]))
+  pd2 %>%
+    dplyr::count(.data[[group_col]], name = "n") %>%
+    dplyr::filter(n >= min_group_n) %>%
+    dplyr::pull(.data[[group_col]]) %>%
+    unique() %>%
+    sort()
+}
+
+
+# Generate a transparent diagnostics table that flags low-power groups.
+# This keeps exclusion logic user-controlled via YAML rather than hard-coded.
+find_low_power_groups <- function(pd, group_col = model_group_col, min_samples_per_group = 2, min_patients_per_group = "", patient_col = col_patient) {
+  if (!(group_col %in% colnames(pd))) {
+    stop("Cannot run low-power diagnostics because modeling column is missing: ", group_col, call. = FALSE)
+  }
+  pd2 <- pd %>% dplyr::mutate(.de_group = .data[[group_col]])
+  group_counts <- pd2 %>% dplyr::count(.de_group, name = "n_samples")
+  group_patient_counts <- pd2 %>% dplyr::group_by(.de_group) %>%
+    dplyr::summarise(n_patients = dplyr::n_distinct(.data[[patient_col]]), .groups = "drop")
+
+  diag_tbl <- dplyr::left_join(group_counts, group_patient_counts, by = ".de_group") %>%
+    dplyr::rename(!!group_col := .de_group)
+  diag_tbl$low_sample_power <- diag_tbl$n_samples < min_samples_per_group
+
+  use_patient_rule <- !is.null(min_patients_per_group) && nzchar(as.character(min_patients_per_group))
+  if (use_patient_rule) {
+    min_pt <- as.numeric(min_patients_per_group)
+    diag_tbl$low_patient_power <- diag_tbl$n_patients < min_pt
+  } else {
+    diag_tbl$low_patient_power <- FALSE
+  }
+
+  diag_tbl$low_power <- diag_tbl$low_sample_power | diag_tbl$low_patient_power
+  diag_tbl
+}
+
+# Generic metadata getter so later code works with multiple object classes.
+get_pheno <- function(obj) {
+  # Normalisation outputs from earlier stages are not always the same class.
+  # This helper standardises metadata access across ExpressionSet,
+  # SummarizedExperiment, and edgeR::DGEList objects.
+  if (inherits(obj, "DGEList")) {
+    return(as.data.frame(obj$samples))
+  }
+  if (methods::is(obj, "ExpressionSet")) {
+    return(Biobase::pData(obj))
+  }
+  if (methods::is(obj, "SummarizedExperiment")) {
+    return(as.data.frame(SummarizedExperiment::colData(obj)))
+  }
+  stop("Unsupported object type for metadata extraction: ", paste(class(obj), collapse = ", "), call. = FALSE)
+}
+
+# Generic metadata setter matching the object-class dispatch above.
+set_pheno <- function(obj, pd) {
+  if (inherits(obj, "DGEList")) {
+    obj$samples <- as.data.frame(pd)
+    return(obj)
+  }
+  if (methods::is(obj, "ExpressionSet")) {
+    Biobase::pData(obj) <- pd
+    return(obj)
+  }
+  if (methods::is(obj, "SummarizedExperiment")) {
+    SummarizedExperiment::colData(obj) <- S4Vectors::DataFrame(pd)
+    return(obj)
+  }
+  stop("Unsupported object type for metadata assignment: ", paste(class(obj), collapse = ", "), call. = FALSE)
+}
+
+# Generic expression matrix getter used by all DE methods and plotting blocks.
+get_expr_mat <- function(obj) {
+  if (inherits(obj, "DGEList")) {
+    return(as.matrix(obj$counts))
+  }
+  if (methods::is(obj, "ExpressionSet")) {
+    return(Biobase::exprs(obj))
+  }
+  if (methods::is(obj, "SummarizedExperiment")) {
+    return(as.matrix(SummarizedExperiment::assay(obj)))
+  }
+  stop("Unsupported object type for expression extraction: ", paste(class(obj), collapse = ", "), call. = FALSE)
+}
+
+# Explicit assay getter for model branches. This is stricter than get_expr_mat()
+# so branch names cannot silently fall back to raw exprs when a normalised assay
+# was requested.
+get_assay_matrix <- function(obj, assay_name = "exprs", context = "model input") {
+  assay_name <- as.character(assay_name[[1]])
+
+  if (inherits(obj, "DGEList")) {
+    if (assay_name %in% c("counts", "exprs", "raw_counts")) {
+      return(as.matrix(obj$counts))
+    }
+    stop(
+      "Assay '", assay_name, "' is not available for DGEList input in ", context,
+      ". Use 'counts' for DGEList objects.",
+      call. = FALSE
+    )
+  }
+
+  if (methods::is(obj, "ExpressionSet")) {
+    assay_names <- Biobase::assayDataElementNames(obj)
+    if (!(assay_name %in% assay_names)) {
+      stop(
+        "Assay '", assay_name, "' was not found in ", context,
+        ". Available assay elements are: ", paste(assay_names, collapse = ", "),
+        call. = FALSE
+      )
+    }
+    return(as.matrix(Biobase::assayDataElement(obj, assay_name)))
+  }
+
+  if (methods::is(obj, "SummarizedExperiment")) {
+    assay_names <- SummarizedExperiment::assayNames(obj)
+    if (length(assay_names) == 0 && assay_name %in% c("assay", "exprs")) {
+      return(as.matrix(SummarizedExperiment::assay(obj)))
+    }
+    if (!(assay_name %in% assay_names)) {
+      stop(
+        "Assay '", assay_name, "' was not found in ", context,
+        ". Available assay names are: ", paste(assay_names, collapse = ", "),
+        call. = FALSE
+      )
+    }
+    return(as.matrix(SummarizedExperiment::assay(obj, assay_name)))
+  }
+
+  stop("Unsupported object type for assay extraction: ", paste(class(obj), collapse = ", "), call. = FALSE)
+}
+
+matrix_is_integer_like <- function(mat, tolerance = sqrt(.Machine$double.eps)) {
+  finite_values <- as.numeric(mat[is.finite(mat)])
+  if (length(finite_values) == 0) return(NA)
+  all(abs(finite_values - round(finite_values)) <= tolerance)
+}
+
+drop_rows_with_na <- function(mat, context = "model input") {
+  mat <- as.matrix(mat)
+  keep <- rowSums(is.na(mat)) == 0
+  dropped <- sum(!keep)
+  if (dropped > 0) {
+    message("Dropping ", dropped, " rows with NA values from ", context, ".")
+  }
+  mat <- mat[keep, , drop = FALSE]
+  if (nrow(mat) < 2 || ncol(mat) < 2) {
+    stop("Not enough data remaining in ", context, " after removing NA rows.", call. = FALSE)
+  }
+  mat
+}
+
+apply_model_input_transform <- function(mat, transform = "identity", prior_count = 0, context = "model input") {
+  mat <- as.matrix(mat)
+
+  if (identical(transform, "identity")) {
+    return(mat)
+  }
+
+  if (identical(transform, "log2_plus_prior")) {
+    prior_count <- as.numeric(prior_count)
+    if (length(prior_count) != 1 || is.na(prior_count) || prior_count < 0) {
+      stop("limma_trend_prior_count must be a single non-negative number.", call. = FALSE)
+    }
+    if (any((mat + prior_count) <= 0, na.rm = TRUE)) {
+      stop(
+        "Cannot log2-transform ", context,
+        " because at least one value plus prior_count is <= 0.",
+        call. = FALSE
+      )
+    }
+    return(log2(mat + prior_count))
+  }
+
+  stop("Unsupported model input transform: ", transform, call. = FALSE)
+}
+
+prepare_model_expression_matrix <- function(
+  obj,
+  assay_name,
+  transform = "identity",
+  prior_count = 0,
+  context = "model input",
+  clean_na = TRUE
+) {
+  mat <- get_assay_matrix(obj, assay_name = assay_name, context = context)
+  mat <- apply_model_input_transform(mat, transform = transform, prior_count = prior_count, context = context)
+  if (isTRUE(clean_na)) {
+    mat <- drop_rows_with_na(mat, context = context)
+  }
+  mat
+}
+
+# Remove rows containing NA values and validate count-like input before voom/dream.
+clean_count_matrix <- function(mat, context = "count matrix") {
+  mat <- drop_rows_with_na(mat, context = context)
+  finite_values <- as.numeric(mat[is.finite(mat)])
+
+  if (any(finite_values < 0)) {
+    stop("Negative values found in ", context, "; voom/dream count branches require count-like non-negative input.", call. = FALSE)
+  }
+
+  if (!isTRUE(matrix_is_integer_like(mat))) {
+    warning(
+      context,
+      " is not integer-like. Confirm that a count-like assay, not a transformed normalised assay, was supplied to the voom/dream branch."
+    )
+  }
+
+  mat
+}
+
+# Resolve user-requested random-effect variable; warn and fall back to fixed-effects when absent.
+resolve_random_effect_var <- function(pd, requested_var) {
+  if (!is.null(requested_var) && nzchar(requested_var) && requested_var %in% colnames(pd)) {
+    return(requested_var)
+  }
+  if (!is.null(requested_var) && nzchar(requested_var) && !(requested_var %in% colnames(pd))) {
+    warning("random_effect_var was provided but not found in metadata: ", requested_var, ". Running without random intercept.")
+  }
+  NA_character_
+}
+
+normalize_model_covariates <- function(x) {
+  if (is.null(x) || length(x) == 0) return(character(0))
+  out <- as.character(unlist(x, use.names = FALSE))
+  out <- trimws(out)
+  out <- out[nzchar(out)]
+  unique(out)
+}
+
+resolve_model_covariate_spec <- function(continuous = character(0), categorical = character(0)) {
+  continuous <- normalize_model_covariates(continuous)
+  categorical <- normalize_model_covariates(categorical)
+
+  duplicated_terms <- intersect(continuous, categorical)
+  if (length(duplicated_terms) > 0) {
+    stop(
+      "The same covariate cannot be listed as both continuous and categorical: ",
+      paste(duplicated_terms, collapse = ", "),
+      ". Choose the intended model encoding and keep each covariate in one YAML list.",
+      call. = FALSE
+    )
+  }
+
+  list(
+    continuous = continuous,
+    categorical = categorical
+  )
+}
+
+model_covariate_names <- function(covariate_spec) {
+  unique(c(covariate_spec$continuous, covariate_spec$categorical))
+}
+
+format_covariate_list <- function(x) {
+  if (length(x) == 0) "None" else paste(x, collapse = ", ")
+}
+
+quote_formula_term <- function(x) {
+  x <- as.character(x[[1]])
+  if (identical(make.names(x), x)) return(x)
+  paste0("`", gsub("`", "\\\\`", x), "`")
+}
+
+build_fixed_effect_formula_text <- function(covariate_spec, group_col = model_group_col) {
+  rhs_terms <- c(group_col, model_covariate_names(covariate_spec))
+  paste("~ 0 +", paste(vapply(rhs_terms, quote_formula_term, character(1)), collapse = " + "))
+}
+
+coerce_continuous_covariate <- function(x, covariate_name) {
+  raw_chr <- trimws(as.character(x))
+  raw_missing <- is.na(x) | is.na(raw_chr) | !nzchar(raw_chr)
+
+  if (is.numeric(x) || is.integer(x)) {
+    out <- as.numeric(x)
+  } else {
+    out <- suppressWarnings(as.numeric(raw_chr))
+    failed_parse <- !raw_missing & is.na(out)
+    if (any(failed_parse)) {
+      examples <- unique(raw_chr[failed_parse])
+      examples <- examples[!is.na(examples)]
+      stop(
+        "Continuous covariate '", covariate_name, "' could not be parsed as numeric. ",
+        "Example non-numeric value(s): ", paste(utils::head(examples, 5), collapse = ", "), ". ",
+        "Clean this metadata column in an earlier stage before running Stage 5, or move the covariate to ",
+        "model_covariates_categorical only if categorical modeling is scientifically intended.",
+        call. = FALSE
+      )
+    }
+    message(sprintf("Parsed continuous covariate '%s' as numeric for model fitting.", covariate_name))
+  }
+
+  out[raw_missing] <- NA_real_
+  out
+}
+
+coerce_categorical_covariate <- function(x, covariate_name) {
+  out <- trimws(as.character(x))
+  out[is.na(x) | is.na(out) | !nzchar(out)] <- NA_character_
+  message(sprintf("Encoding categorical covariate '%s' as a factor for model fitting.", covariate_name))
+  factor(out)
+}
+
+prepare_model_metadata <- function(pd, covariate_spec) {
+  covariates <- model_covariate_names(covariate_spec)
+  missing_cov <- setdiff(covariates, colnames(pd))
+  if (length(missing_cov) > 0) {
+    stop(
+      sprintf(
+        "Requested model covariates not found in metadata: %s.",
+        paste(missing_cov, collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+
+  for (cov in covariate_spec$continuous) {
+    pd[[cov]] <- coerce_continuous_covariate(pd[[cov]], cov)
+  }
+  for (cov in covariate_spec$categorical) {
+    pd[[cov]] <- coerce_categorical_covariate(pd[[cov]], cov)
+  }
+
+  pd
+}
+
+validate_model_covariates <- function(pd, covariate_spec) {
+  covariates <- model_covariate_names(covariate_spec)
+  if (length(covariates) == 0) {
+    message(sprintf("Model formula mode: default (~0 + %s). No additional fixed-effect covariates requested.", model_group_col))
+    return(invisible(pd))
+  }
+
+  missing_cov <- setdiff(covariates, colnames(pd))
+  if (length(missing_cov) > 0) {
+    stop(
+      sprintf(
+        "Requested model covariates not found in metadata: %s.",
+        paste(missing_cov, collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+
+  missing_value_counts <- vapply(covariates, function(cn) sum(is.na(pd[[cn]])), integer(1))
+  covariates_with_missing_values <- names(missing_value_counts)[missing_value_counts > 0]
+  if (length(covariates_with_missing_values) > 0) {
+    stop(
+      sprintf(
+        "Requested model covariates contain missing values after type preparation: %s. Remove, impute, or correct these values in an earlier stage before Stage 5.",
+        paste(
+          sprintf("%s (%d missing)", covariates_with_missing_values, missing_value_counts[covariates_with_missing_values]),
+          collapse = ", "
+        )
+      ),
+      call. = FALSE
+    )
+  }
+
+  nonfinite_continuous <- covariate_spec$continuous[vapply(covariate_spec$continuous, function(cn) {
+    any(!is.finite(pd[[cn]]))
+  }, logical(1))]
+  if (length(nonfinite_continuous) > 0) {
+    stop(
+      "Continuous model covariates contain non-finite values after numeric conversion: ",
+      paste(nonfinite_continuous, collapse = ", "),
+      ". Correct these metadata values in an earlier stage before Stage 5.",
+      call. = FALSE
+    )
+  }
+
+  bad_cov <- covariates[vapply(covariates, function(cn) {
+    n_distinct(stats::na.omit(pd[[cn]])) < 2
+  }, logical(1))]
+  if (length(bad_cov) > 0) {
+    stop(
+      sprintf(
+        "Requested model covariates with <2 observed values after type preparation: %s. Remove these covariates or verify metadata values.",
+        paste(bad_cov, collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+
+  message(sprintf("Model formula mode: ~0 + %s + %s", model_group_col, paste(covariates, collapse = " + ")))
+  invisible(pd)
+}
+
+validate_design_matrix <- function(design, context = "model design") {
+  design_rank <- qr(design)$rank
+  if (design_rank < ncol(design)) {
+    stop(
+      "The ", context, " is not full rank (rank ", design_rank, " for ",
+      ncol(design), " columns). This usually means one or more covariates are ",
+      "redundant with the contrast groups or with each other. Remove or recode ",
+      "the redundant covariate before interpreting DE results.",
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
+build_limma_design <- function(pd, covariate_spec, group_col = model_group_col) {
+  if (!(group_col %in% colnames(pd))) {
+    stop("Model group column not found in metadata: ", group_col, call. = FALSE)
+  }
+  form_text <- build_fixed_effect_formula_text(covariate_spec, group_col = group_col)
+  design <- model.matrix(stats::as.formula(form_text), data = pd)
+  if (nrow(design) != nrow(pd)) {
+    stop(
+      "The limma model matrix has fewer rows than the prepared metadata. ",
+      "Check for missing values in model covariates or the contrast factor before fitting.",
+      call. = FALSE
+    )
+  }
+  colnames(design) <- make.names(colnames(design))
+  validate_design_matrix(design, context = "limma fixed-effect design")
+
+  # Match group coefficient names to the contrast syntax configured by the user.
+  #
+  # Why this matters for protocol users:
+  # - Contrast expressions are generated from selected DE group labels such as
+  #   "Acinar_Healthy" or "control_duct".
+  # - model.matrix(~ 0 + DE_Group) prefixes coefficient names with "DE_Group"
+  #   (for example "DE_GroupAcinar_Healthy"), which is difficult for users to
+  #   anticipate when writing or reviewing contrasts.
+  #
+  # We remove only the leading modeling-column token from group terms so
+  # contrast expressions remain readable and directly interpretable by users.
+  # Covariate columns (age, sex, slide_name, etc.) are left unchanged.
+  group_prefix <- paste0("^", make.names(group_col))
+  group_cols <- grepl(group_prefix, colnames(design))
+  if (any(group_cols)) {
+    colnames(design)[group_cols] <- sub(group_prefix, "", colnames(design)[group_cols])
+  }
+
+  list(design = design, formula_text = form_text)
+}
+
+# Validate that all symbols referenced inside contrast expressions are present
+# in the fitted model coefficient names.
+#
+# This guard provides an explicit, user-friendly error before limma internals
+# fail, and it prints both missing symbols and available coefficients so users
+# can review dataset-specific naming issues.
+validate_contrast_symbols <- function(contrast_expr, available_levels, context = "limma") {
+  if (length(contrast_expr) == 0) return(invisible(TRUE))
+
+  expr_text <- paste(contrast_expr, collapse = " ")
+  tokens <- stringr::str_extract_all(expr_text, "[A-Za-z][A-Za-z0-9_.]*")[[1]]
+  tokens <- unique(tokens)
+
+  # Exclude reserved math tokens and helper words that may appear in text.
+  reserved <- c("Non")
+  symbols <- setdiff(tokens, reserved)
+
+  missing <- setdiff(symbols, available_levels)
+  if (length(missing) > 0) {
+    stop(
+      paste0(
+        "Contrast/Design naming mismatch detected in ", context, ". ",
+        "The following contrast symbol(s) were not found in model coefficients: ",
+        paste(missing, collapse = ", "), ". ",
+        "Available coefficient names are: ",
+        paste(sort(unique(available_levels)), collapse = ", "), ". ",
+        "Please check params$contrast_factor, the contrast file, and contrast generation settings."
+      ),
+      call. = FALSE
+    )
+  }
+
+  invisible(TRUE)
+}
+
+
+# Build a composite grouping ID (e.g., patient_id + location) for repeated-measures random effects.
+add_grouping_id_column <- function(obj, grouping_id_vars, new_col = "grouping_id") {
+  if (is.null(grouping_id_vars) || length(grouping_id_vars) == 0) return(obj)
+  pd <- get_pheno(obj)
+  missing_cols <- setdiff(grouping_id_vars, colnames(pd))
+  if (length(missing_cols) > 0) {
+    warning("Skipping grouping_id construction; missing column(s): ", paste(missing_cols, collapse = ", "))
+    return(obj)
+  }
+  pd[[new_col]] <- apply(pd[, grouping_id_vars, drop = FALSE], 1, paste, collapse = "_")
+  set_pheno(obj, pd)
+}
+
+
+subset_samples <- function(obj, keep) {
+  if (inherits(obj, "DGEList")) {
+    return(obj[, keep, keep.lib.sizes = FALSE])
+  }
+  if (methods::is(obj, "ExpressionSet") || methods::is(obj, "SummarizedExperiment")) {
+    return(obj[, keep])
+  }
+  stop("Unsupported object type for sample subsetting: ", paste(class(obj), collapse = ", "), call. = FALSE)
+}
+
+# Parse and validate contrast specifications from YAML/file settings.
+# Supports auto one-vs-rest generation and explicit pairwise definitions.
+format_available_levels <- function(levels) {
+  paste(sort(unique(levels)), collapse = ", ")
+}
+
+validate_contrast_level <- function(value, level_type, available_levels, contrast_factor_col) {
+  raw_value <- trimws(as.character(value))
+  clean_value <- make.names(raw_value)
+  if (clean_value %in% available_levels) return(clean_value)
+
+  sanitized_note <- if (!identical(raw_value, clean_value)) {
+    sprintf(" (sanitized as '%s')", clean_value)
+  } else {
+    ""
+  }
+
+  stop(
+    sprintf(
+      "%s '%s'%s not found in contrast_factor '%s'. Available levels are: %s.",
+      level_type,
+      raw_value,
+      sanitized_note,
+      contrast_factor_col,
+      format_available_levels(available_levels)
+    ),
+    call. = FALSE
+  )
+}
+
+read_contrast_spec <- function(path_to_file, group_levels, model_mode = "one_vs_rest_mixed", contrast_factor_col = contrast_factor) {
+  levs <- sort(unique(make.names(as.character(group_levels))))
+
+  if (identical(model_mode, "one_vs_rest_mixed") && (is.na(path_to_file) || !nzchar(path_to_file))) {
+    return(tibble::tibble(
+      factor = contrast_factor_col,
+      group_1 = levs,
+      group_2 = paste0("Non", levs),
+      contrast_expr = purrr::map_chr(levs, ~ paste0(
+        .x, " - (", paste0(setdiff(levs, .x), collapse = " + "), ")/", length(setdiff(levs, .x))
+      ))
+    ))
+  }
+
+  if (is.na(path_to_file) || !nzchar(path_to_file) || !file_exists(path_to_file)) {
+    stop("Contrast file not found: ", path_to_file, call. = FALSE)
+  }
+
+  spec <- tryCatch(readr::read_tsv(path_to_file, comment = "#", show_col_types = FALSE), error = function(e) NULL)
+  if (is.null(spec) || ncol(spec) < 3 || !all(c("factor", "numerator", "denominator") %in% janitor::make_clean_names(colnames(spec)))) {
+    warning("Contrast file could not be parsed as TSV; retrying as CSV.")
+    spec <- readr::read_csv(path_to_file, comment = "#", show_col_types = FALSE)
+  }
+
+  spec <- spec %>% janitor::clean_names()
+  required <- c("factor", "numerator", "denominator")
+  missing <- setdiff(required, colnames(spec))
+  if (length(missing) > 0) {
+    stop("Contrast file must contain columns: factor, numerator, denominator. Missing: ", paste(missing, collapse = ", "), call. = FALSE)
+  }
+
+  spec$factor <- trimws(as.character(spec$factor))
+  invalid_factors <- setdiff(unique(spec$factor), contrast_factor_col)
+  if (length(invalid_factors) > 0) {
+    stop(
+      sprintf(
+        "Contrast file factor values must match params$contrast_factor ('%s'). Found unsupported factor value(s): %s.",
+        contrast_factor_col,
+        paste(invalid_factors, collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+
+  if (identical(model_mode, "one_vs_rest_mixed")) {
+    rows <- purrr::pmap_dfr(spec, function(factor, numerator, denominator) {
+      numerator <- validate_contrast_level(numerator, "Numerator", levs, contrast_factor_col)
+      others <- setdiff(levs, numerator)
+      tibble::tibble(
+        factor = contrast_factor_col,
+        group_1 = numerator,
+        group_2 = paste0("Non", numerator),
+        contrast_expr = paste0(numerator, " - (", paste0(others, collapse = " + "), ")/", length(others))
+      )
+    })
+    return(dplyr::distinct(rows))
+  }
+
+  rows <- purrr::pmap_dfr(spec, function(factor, numerator, denominator) {
+    numerator <- validate_contrast_level(numerator, "Numerator", levs, contrast_factor_col)
+    denominator <- validate_contrast_level(denominator, "Denominator", levs, contrast_factor_col)
+    tibble::tibble(
+      factor = contrast_factor_col,
+      group_1 = numerator,
+      group_2 = denominator,
+      contrast_expr = paste0(numerator, "-", denominator)
+    )
+  })
+
+  dplyr::distinct(rows)
+}
+
+
+# Assemble all pre-model inputs in one place: metadata preparation,
+# low-power diagnostics, shared-group detection, and contrast-table creation.
+build_analysis_bundle <- function(
+  geodiff_obj = NULL,
+  q3_obj,
+  geodiff_norm_obj = NULL,
+  tmm_obj,
+  contrast_file_path,
+  contrast_factor_col = contrast_factor,
+  model_group = model_group_col,
+  model_mode = "one_vs_rest_mixed",
+  min_samples_per_group = 2,
+  min_patients_per_group = "",
+  auto_exclude_low_power = FALSE
+) {
+  if (is.null(q3_obj)) {
+    stop("Q3/negative-probe normalised object is required for stage 5 DE calculation.", call. = FALSE)
+  }
+  if (is.null(tmm_obj)) {
+    stop("TMM normalised object is required for stage 5 DE calculation.", call. = FALSE)
+  }
+
+  if (!is.null(geodiff_obj)) {
+    geodiff_obj <- prepare_metadata(geodiff_obj, contrast_factor_col = contrast_factor_col, model_group = model_group)
+  }
+  q3_obj <- prepare_metadata(q3_obj, contrast_factor_col = contrast_factor_col, model_group = model_group)
+  if (!is.null(geodiff_norm_obj)) {
+    geodiff_norm_obj <- prepare_metadata(geodiff_norm_obj, contrast_factor_col = contrast_factor_col, model_group = model_group)
+  }
+  tmm_obj <- prepare_metadata(tmm_obj, contrast_factor_col = contrast_factor_col, model_group = model_group)
+
+  bundle_objects <- list(
+    q3 = q3_obj,
+    tmm = tmm_obj,
+    geodiff = geodiff_obj,
+    geodiff_norm = geodiff_norm_obj
+  )
+  available_objects <- bundle_objects[!vapply(bundle_objects, is.null, logical(1))]
+
+  power_diag <- find_low_power_groups(
+    get_pheno(q3_obj),
+    group_col = model_group,
+    min_samples_per_group = min_samples_per_group,
+    min_patients_per_group = min_patients_per_group,
+    patient_col = col_patient
+  )
+
+  low_power_groups <- power_diag[[model_group]][power_diag$low_power]
+  if (length(low_power_groups) > 0) {
+    warning("Low-power groups detected: ", paste(low_power_groups, collapse = ", "))
+    if (isTRUE(auto_exclude_low_power)) {
+      available_objects <- lapply(
+        available_objects,
+        remove_low_power_groups,
+        low_power_groups = low_power_groups,
+        group_col = model_group
+      )
+      q3_obj <- available_objects$q3
+      tmm_obj <- available_objects$tmm
+      geodiff_obj <- available_objects$geodiff
+      geodiff_norm_obj <- available_objects$geodiff_norm
+    }
+  }
+
+  available_objects <- list(
+    q3 = q3_obj,
+    tmm = tmm_obj,
+    geodiff = geodiff_obj,
+    geodiff_norm = geodiff_norm_obj
+  )
+  available_objects <- available_objects[!vapply(available_objects, is.null, logical(1))]
+
+  shared_levels <- Reduce(intersect, lapply(
+    available_objects,
+    function(obj) eligible_group_levels(get_pheno(obj), group_col = model_group, min_group_n = min_samples_per_group)
+  ))
+
+  if (length(shared_levels) < 2) {
+    stop(
+      sprintf(
+        "Need at least two shared DE groups across available inputs for contrast_factor '%s'. Available objects: %s. Shared levels detected: %s.",
+        contrast_factor_col,
+        paste(names(available_objects), collapse = ", "),
+        ifelse(length(shared_levels) == 0, "none", paste(shared_levels, collapse = ", "))
+      ),
+      call. = FALSE
+    )
+  }
+
+  contrast_table <- read_contrast_spec(
+    path_to_file = contrast_file_path,
+    group_levels = shared_levels,
+    model_mode = model_mode,
+    contrast_factor_col = contrast_factor_col
+  )
+
+  list(
+    geodiff = geodiff_obj,
+    q3 = q3_obj,
+    geodiff_norm = geodiff_norm_obj,
+    tmm = tmm_obj,
+    available_object_names = names(available_objects),
+    shared_levels = shared_levels,
+    contrast_factor = contrast_factor_col,
+    model_group_col = model_group,
+    contrast_table = contrast_table,
+    power_diagnostics = power_diag
+  )
+}
+
+
+# Write object/group/contrast diagnostics so users can audit what entered model fitting.
+emit_parity_diagnostics <- function(bundle, out_tables_dir, random_effect_var, contrast_file_path, contrast_factor_col, model_group_col) {
+  bundle_objects <- list(
+    geodiff = bundle$geodiff,
+    q3 = bundle$q3,
+    geodiff_norm = bundle$geodiff_norm,
+    tmm = bundle$tmm
+  )
+  available_objects <- bundle_objects[!vapply(bundle_objects, is.null, logical(1))]
+
+  # Object-level diagnostics
+  object_diag <- purrr::imap_dfr(available_objects, function(obj, object_name) {
+    tibble::tibble(
+      object_name = object_name,
+      object_class = paste(class(obj), collapse = ", "),
+      n_features = nrow(get_expr_mat(obj)),
+      n_samples = ncol(get_expr_mat(obj))
+    )
+  })
+
+  # Annotation-level diagnostics
+  ann_diag <- purrr::imap_dfr(available_objects, function(obj, object_name) {
+    get_pheno(obj) %>%
+      dplyr::count(Annotation, name = "n") %>%
+      dplyr::mutate(object_name = object_name)
+  }) %>% dplyr::arrange(object_name, dplyr::desc(n), Annotation)
+
+  count_de_groups <- function(obj, object_name) {
+    get_pheno(obj) %>%
+      dplyr::mutate(DE_Group = .data[[model_group_col]]) %>%
+      dplyr::count(DE_Group, name = "n") %>%
+      dplyr::mutate(object_name = object_name)
+  }
+
+  group_diag <- purrr::imap_dfr(available_objects, function(obj, object_name) {
+    count_de_groups(obj, object_name)
+  }) %>%
+    dplyr::mutate(contrast_factor = contrast_factor_col) %>%
+    dplyr::arrange(object_name, dplyr::desc(n), DE_Group)
+
+  shared_diag <- tibble::tibble(
+    contrast_factor = contrast_factor_col,
+    shared_de_group_level = bundle$shared_levels
+  )
+  contrast_diag <- bundle$contrast_table
+
+  readr::write_csv(object_diag, path(out_tables_dir, "parity_diagnostics_object_summary.csv"))
+  readr::write_csv(ann_diag, path(out_tables_dir, "parity_diagnostics_annotation_counts.csv"))
+  readr::write_csv(group_diag, path(out_tables_dir, "parity_diagnostics_de_group_counts.csv"))
+  readr::write_csv(shared_diag, path(out_tables_dir, "parity_diagnostics_shared_levels.csv"))
+  readr::write_csv(contrast_diag, path(out_tables_dir, "parity_diagnostics_contrast_table.csv"))
+
+  message("Consistency diagnostics written to: ", out_tables_dir)
+  message("Contrast file in use: ", contrast_file_path)
+  message("Contrast factor in use: ", contrast_factor_col, " (modeled internally as ", model_group_col, ")")
+  message("Random intercept variable: ", random_effect_var)
+  message("Shared DE group levels: ", paste(bundle$shared_levels, collapse = ", "))
+}
+
+# Generic cache utility for method result objects.
+# This is intentionally reusable across limma branches so behaviour is consistent.
+#
+# Cache policy in this protocol:
+# - If use_cache = TRUE and file exists:
+#     - load RDS
+#     - accept only non-empty list objects
+#     - otherwise warn and recompute
+# - If use_cache = FALSE or cache missing/invalid:
+#     - run `fit_fn()`
+#     - save result to cache_path
+run_or_load_method_cache <- function(cache_path, use_cache, method_label, fit_fn,
+                                     expected_contrasts = NULL) {
+  if (isTRUE(use_cache) && file_exists(cache_path)) {
+    message("[", method_label, "] Cache enabled. Found cache file: ", cache_path)
+    cached <- readRDS(cache_path)
+    # Accept the cache only when it is a non-empty list AND, when contrast names are
+    # known, its names match the current contrast expressions. This prevents loading
+    # stale results after contrast_file/model_mode/contrast_factor changes.
+    cache_valid <- is.list(cached) && length(cached) > 0 &&
+      (is.null(expected_contrasts) || identical(names(cached), expected_contrasts))
+    if (cache_valid) {
+      message("[", method_label, "] Loaded cached results successfully.")
+      return(cached)
+    }
+    warning("[", method_label, "] Cache file exists but is invalid/empty or does not match the current contrast expressions. Recomputing and overwriting cache.")
+  } else if (isTRUE(use_cache)) {
+    message("[", method_label, "] Cache enabled, but no cache file found. Fitting model now.")
+  } else {
+    message("[", method_label, "] Cache disabled. Fitting model now.")
+  }
+
+  out <- fit_fn()
+  saveRDS(out, cache_path)
+  message("[", method_label, "] Saved results cache to: ", cache_path)
+  out
+}
+
+resolve_model_cache_setting <- function(use_cache, method_label, covariate_spec) {
+  if (isTRUE(use_cache) && length(model_covariate_names(covariate_spec)) > 0) {
+    warning(
+      "[", method_label, "] Cache disabled because fixed-effect covariates are requested. ",
+      "Refitting ensures the current covariate formula is applied.",
+      call. = FALSE
+    )
+    return(FALSE)
+  }
+  isTRUE(use_cache)
+}
+
+# Save a base-graphics DE diagnostic (a voom/voomWithDreamWeights mean-variance
+# trend, or a limma-trend plotSA) to a deterministic per-branch PNG under the
+# stage-5 figure directory. The deterministic name (meanvar_<branch>.png) lets the
+# rendering section locate the figure later by reconstructing the same path, and
+# means a cached fit (which never reaches this code) simply leaves any earlier PNG
+# untouched. Drawing errors are downgraded to a warning and return NA so a single
+# failed diagnostic never aborts model fitting.
+save_de_diagnostic_png <- function(branch_label, draw_fn, out_dir = out_figures_de,
+                                   width = 1400, height = 1100, res = 150) {
+  if (is.null(branch_label) || !nzchar(as.character(branch_label))) return(NA_character_)
+  file_name <- paste0("meanvar_", sanitize_col_name(branch_label, "branch"), ".png")
+  png_path <- protocol_contract_path(
+    out_dir, file_name, portable_path_limit,
+    paste0("Stage 5 mean-variance diagnostic (", branch_label, ")")
+  )
+  ok <- FALSE
+  grDevices::png(filename = png_path, width = width, height = height, res = res)
+  tryCatch(
+    {
+      draw_fn()
+      ok <- TRUE
+    },
+    error = function(e) {
+      warning("[", branch_label, "] Could not render mean-variance diagnostic: ",
+              conditionMessage(e), call. = FALSE)
+    },
+    finally = grDevices::dev.off()
+  )
+  if (isTRUE(ok)) png_path else NA_character_
+}
+
+# limma-voom branch for count-like data with duplicateCorrelation where possible.
+run_limma_voom <- function(obj, contrastTable, random_effect_var, model_covariate_spec,
+                           branch_label = NULL) {
+  pd <- get_pheno(obj)
+  pd <- prepare_model_metadata(pd, model_covariate_spec)
+  validate_model_covariates(pd, model_covariate_spec)
+
+  # voom workflow starts from count-like matrices and estimates mean-variance weights.
+  # TMM scaling is represented by calcNormFactors(d); voom therefore leaves
+  # between-array normalisation disabled rather than applying an additional
+  # quantile normalisation step.
+  counts_mat <- clean_count_matrix(
+    get_assay_matrix(obj, assay_name = if (inherits(obj, "DGEList")) "counts" else "exprs", context = "limma-voom count input"),
+    context = "limma-voom count input"
+  )
+  d <- DGEList(counts = counts_mat, group = pd[[model_group_col]])
+  d <- calcNormFactors(d)
+
+  design_info <- build_limma_design(pd, model_covariate_spec, group_col = model_group_col)
+  design <- design_info$design
+
+  # First voom pass gets initial precision weights. If a random-effect column is available,
+  # duplicateCorrelation is used to account for repeated sampling within patient/slide.
+  block_var <- resolve_random_effect_var(pd, random_effect_var)
+  v <- voom(d, design = design, normalize.method = "none", plot = FALSE)
+
+  if (!is.na(block_var)) {
+    corfit <- duplicateCorrelation(v, design = design, block = pd[[block_var]])
+    v <- voom(d, design = design, normalize.method = "none", plot = FALSE,
+              block = pd[[block_var]], correlation = corfit$consensus)
+    corfit <- duplicateCorrelation(v, design = design, block = pd[[block_var]])
+    fit <- lmFit(v, design, block = pd[[block_var]], correlation = corfit$consensus)
+  } else {
+    fit <- lmFit(v, design)
+  }
+
+  # Mean-variance diagnostic: the standard un-blocked voom trend (matches the voom
+  # vignette QC view). Captured here because the fitted objects only exist during
+  # fitting; a cached run skips this and reuses any existing PNG.
+  save_de_diagnostic_png(branch_label, function() {
+    voom(d, design = design, normalize.method = "none", plot = TRUE)
+    graphics::title(sub = paste0("limma-voom mean-variance trend: ", branch_label))
+  })
+
+  coef_levels <- colnames(coef(fit))
+  validate_contrast_symbols(contrastTable$contrast_expr, coef_levels, context = "limma-voom")
+  cm <- makeContrasts(contrasts = contrastTable$contrast_expr, levels = coef_levels)
+  fit2 <- eBayes(contrasts.fit(fit, cm), trend = FALSE, robust = TRUE)
+
+  res <- lapply(seq_len(ncol(cm)), function(i) getResultsDataFrame(fit2, i, contrastTable$group_1[i], contrastTable$group_2[i]))
+  names(res) <- colnames(cm)
+  res
+}
+
+# limma-trend branch for transformed/normalised expression matrices.
+run_limma_trend <- function(
+  obj,
+  contrastTable,
+  random_effect_var,
+  model_covariate_spec,
+  assay_name = "exprs",
+  transform = "identity",
+  prior_count = 0,
+  input_label = "limma-trend input",
+  branch_label = NULL
+) {
+  pd <- get_pheno(obj)
+  pd <- prepare_model_metadata(pd, model_covariate_spec)
+  validate_model_covariates(pd, model_covariate_spec)
+  # limma-trend branch operates directly on transformed/normalised expression.
+  design_info <- build_limma_design(pd, model_covariate_spec, group_col = model_group_col)
+  design <- design_info$design
+
+  # duplicateCorrelation gives random-intercept-like handling in limma when possible.
+  expr_mat <- prepare_model_expression_matrix(
+    obj,
+    assay_name = assay_name,
+    transform = transform,
+    prior_count = prior_count,
+    context = input_label,
+    clean_na = TRUE
+  )
+  block_var <- resolve_random_effect_var(pd, random_effect_var)
+
+  if (!is.na(block_var)) {
+    corfit <- duplicateCorrelation(expr_mat, design = design, block = pd[[block_var]])
+    fit <- lmFit(expr_mat, design = design, block = pd[[block_var]], correlation = corfit$consensus)
+  } else {
+    fit <- lmFit(expr_mat, design)
+  }
+
+  coef_levels <- colnames(coef(fit))
+  validate_contrast_symbols(contrastTable$contrast_expr, coef_levels, context = "limma-trend")
+  cm <- makeContrasts(contrasts = contrastTable$contrast_expr, levels = coef_levels)
+  fit2 <- eBayes(contrasts.fit(fit, cm), trend = TRUE, robust = TRUE)
+
+  # Mean-variance diagnostic for limma-trend: plotSA shows each gene's residual SD
+  # against average log-expression with the empirical-Bayes trend line.
+  save_de_diagnostic_png(branch_label, function()
+    limma::plotSA(fit2, main = paste0("limma-trend mean-variance (plotSA): ", branch_label)))
+
+  res <- lapply(seq_len(ncol(cm)), function(i) getResultsDataFrame(fit2, i, contrastTable$group_1[i], contrastTable$group_2[i]))
+  names(res) <- colnames(cm)
+  res
+}
+
+translate_contrasts_for_dream <- function(contrast_expr, coefficient_map) {
+  escape_regex <- function(x) {
+    gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", x, perl = TRUE)
+  }
+
+  out <- as.character(contrast_expr)
+  for (symbol in names(coefficient_map)[order(nchar(names(coefficient_map)), decreasing = TRUE)]) {
+    pattern <- paste0(
+      "(?<![A-Za-z0-9_.])",
+      escape_regex(symbol),
+      "(?![A-Za-z0-9_.])"
+    )
+    out <- gsub(pattern, coefficient_map[[symbol]], out, perl = TRUE)
+  }
+  out
+}
+
+# dream branch for mixed-model DE; fits one global group model and applies the
+# same expanded contrast expressions used by limma.
+run_dream <- function(
+  obj,
+  contrastTable,
+  random_effect_var,
+  cache_path,
+  model_covariate_spec,
+  use_cache = TRUE,
+  allow_random_slope = FALSE,
+  seed = NULL,
+  branch_label = NULL
+) {
+  expected_contrasts <- as.character(contrastTable$contrast_expr)
+  requested_covariates <- model_covariate_names(model_covariate_spec)
+
+  if (isTRUE(use_cache) && length(requested_covariates) > 0) {
+    warning(
+      "Dream cache disabled for this run because fixed-effect covariates are requested. ",
+      "Refitting ensures the current covariate formula is applied.",
+      call. = FALSE
+    )
+    use_cache <- FALSE
+  }
+
+  if (use_cache && file_exists(cache_path)) {
+    cached <- readRDS(cache_path)
+    if (
+      is.list(cached) &&
+      length(cached) > 0 &&
+      identical(names(cached), expected_contrasts)
+    ) {
+      return(cached)
+    }
+    warning("dream cache exists but is invalid or does not match the current expanded contrast expressions; refitting and overwriting cache.")
+  }
+
+  pd <- get_pheno(obj)
+  if (!(model_group_col %in% colnames(pd))) {
+    stop("Model group column not found in metadata for dream: ", model_group_col, call. = FALSE)
+  }
+
+  pd[[model_group_col]] <- factor(
+    as.character(pd[[model_group_col]]),
+    levels = sort(unique(as.character(pd[[model_group_col]])))
+  )
+  if (length(levels(pd[[model_group_col]])) < 2) {
+    warning("Dream skipped because fewer than two DE groups were available.")
+    return(list())
+  }
+
+  pd <- prepare_model_metadata(pd, model_covariate_spec)
+  validate_model_covariates(pd, model_covariate_spec)
+
+  block_var <- resolve_random_effect_var(pd, random_effect_var)
+  if (is.na(block_var) || length(unique(pd[[block_var]])) < 2) {
+    warning("Dream skipped because no valid random-effect column with >=2 levels was available.")
+    return(list())
+  }
+
+  counts_mat <- clean_count_matrix(
+    get_assay_matrix(obj, assay_name = if (inherits(obj, "DGEList")) "counts" else "exprs", context = "dream count input"),
+    context = "dream count input"
+  )
+  y <- edgeR::DGEList(counts = counts_mat)
+  y <- edgeR::calcNormFactors(y)
+
+  workers <- max(1, parallel::detectCores() - 1)
+  # Seed the parallel backend so dream's stochastic steps are reproducible: the
+  # top-level set.seed() does not propagate to BiocParallel workers.
+  bp <- if (.Platform$OS.type == "windows") {
+    BiocParallel::SnowParam(workers = workers, RNGseed = seed)
+  } else {
+    BiocParallel::MulticoreParam(workers = workers, RNGseed = seed)
+  }
+
+  fixed_formula_text <- build_fixed_effect_formula_text(model_covariate_spec, group_col = model_group_col)
+  fixed_design <- stats::model.matrix(
+    stats::as.formula(fixed_formula_text),
+    data = pd
+  )
+  if (nrow(fixed_design) != nrow(pd)) {
+    stop(
+      "The dream fixed-effect model matrix has fewer rows than the prepared metadata. ",
+      "Check for missing values in model covariates or the contrast factor before fitting.",
+      call. = FALSE
+    )
+  }
+  validate_design_matrix(fixed_design, context = "dream fixed-effect design")
+
+  coefficient_names <- colnames(fixed_design)
+  group_prefix <- paste0("^", make.names(model_group_col))
+  group_coefficient_names <- coefficient_names[grepl(group_prefix, coefficient_names)]
+  coefficient_map <- stats::setNames(
+    group_coefficient_names,
+    sub(group_prefix, "", group_coefficient_names)
+  )
+
+  validate_contrast_symbols(
+    contrastTable$contrast_expr,
+    names(coefficient_map),
+    context = "dream"
+  )
+  dream_contrasts <- translate_contrasts_for_dream(
+    contrastTable$contrast_expr,
+    coefficient_map
+  )
+
+  fixed_rhs_text <- paste(
+    vapply(c(model_group_col, requested_covariates), quote_formula_term, character(1)),
+    collapse = " + "
+  )
+  form_intercept <- stats::as.formula(paste0("~ 0 + ", fixed_rhs_text, " + (1|`", block_var, "`)"))
+  form_slope <- stats::as.formula(paste0("~ 0 + ", fixed_rhs_text, " + (1 + ", quote_formula_term(model_group_col), "|`", block_var, "`)"))
+  message("Dream fixed-effect formula: ", fixed_formula_text)
+
+  fit <- tryCatch({
+    form_use <- if (isTRUE(allow_random_slope)) form_slope else form_intercept
+    vobj <- variancePartition::voomWithDreamWeights(y, form_use, pd, BPPARAM = bp)
+    L <- variancePartition::makeContrastsDream(form_use, pd, contrasts = dream_contrasts)
+    fit_i <- variancePartition::dream(vobj, form_use, pd, L)
+    variancePartition::eBayes(fit_i)
+  }, error = function(e) {
+    if (isTRUE(allow_random_slope)) {
+      warning("Dream random-slope global model failed; falling back to random-intercept.")
+      vobj <- variancePartition::voomWithDreamWeights(y, form_intercept, pd, BPPARAM = bp)
+      L <- variancePartition::makeContrastsDream(form_intercept, pd, contrasts = dream_contrasts)
+      fit_i <- variancePartition::dream(vobj, form_intercept, pd, L)
+      return(variancePartition::eBayes(fit_i))
+    }
+    stop("Dream failed for global contrast model: ", conditionMessage(e), call. = FALSE)
+  })
+
+  # Mean-variance diagnostic for dream. voomWithDreamWeights draws the same kind of
+  # trend as limma-voom; it is recomputed once with the random-intercept form (always
+  # valid, representative trend shape) purely to capture the figure, keeping device
+  # handling isolated from the slope/intercept fallback above.
+  save_de_diagnostic_png(branch_label, function() {
+    variancePartition::voomWithDreamWeights(y, form_intercept, pd, BPPARAM = bp, plot = TRUE)
+    graphics::title(sub = paste0("dream mean-variance trend (random intercept): ", branch_label))
+  })
+
+  out <- lapply(seq_along(expected_contrasts), function(i) {
+    getResultsDataFrame(fit, i, contrastTable$group_1[i], contrastTable$group_2[i])
+  })
+  names(out) <- expected_contrasts
+
+  if (length(out) == 0) {
+    warning("Dream did not return any valid contrast results.")
+    return(list())
+  }
+
+  saveRDS(out, cache_path)
+  out
+}
+
+
+# Clean result tables before plotting to avoid NA-driven plotting failures.
+sanitize_results_table <- function(results_table, method_label = "method") {
+  cleaned <- lapply(seq_along(results_table), function(i) {
+    nm <- names(results_table)[i]
+    df <- as.data.frame(results_table[[i]])
+
+    if (!all(c("logFC", "adj.P.Val") %in% colnames(df))) {
+      return(NULL)
+    }
+
+    keep <- !is.na(df$logFC) & !is.na(df$adj.P.Val)
+    dropped <- sum(!keep)
+    if (dropped > 0) {
+      message("[", method_label, ":", nm, "] dropping ", dropped, " rows with NA logFC/adj.P.Val before plotting.")
+    }
+    df <- df[keep, , drop = FALSE]
+    if (nrow(df) == 0) return(NULL)
+    df
+  })
+
+  names(cleaned) <- names(results_table)
+  cleaned <- cleaned[!vapply(cleaned, is.null, logical(1))]
+  cleaned
+}
+
+# Build Excel-safe, unique worksheet names from contrast names.
+# Excel sheet-name rules: <= 31 characters; cannot contain [ ] : * ? / \ ;
+# cannot be blank; no leading/trailing apostrophe; must be unique (Excel compares
+# names case-insensitively). The reserved "_index" key sheet is seeded into the
+# "seen" set so no contrast can ever collide with it. Full contrast names are
+# preserved separately in the _index sheet, so truncation here is lossless overall.
+make_excel_sheet_names <- function(contrast_names) {
+  seen <- tolower("_index")
+  vapply(as.character(contrast_names), function(nm) {
+    # perl = TRUE so backslash escaping works inside the class; the default TRE
+    # engine treats "\" as literal and lets "]" close the class early, which would
+    # leave Excel-illegal characters in the sheet name.
+    base <- gsub("[\\\\/?*\\[\\]:]", "_", nm, perl = TRUE)
+    base <- gsub("^'+|'+$", "", base)
+    base <- trimws(base)
+    if (!nzchar(base)) base <- "contrast"
+    base <- substr(base, 1, 31)
+    candidate <- base
+    suffix <- 1L
+    while (tolower(candidate) %in% seen) {
+      suffix <- suffix + 1L
+      tag <- paste0("_", suffix)
+      candidate <- paste0(substr(base, 1, max(0L, 31L - nchar(tag))), tag)
+    }
+    seen[[length(seen) + 1L]] <<- tolower(candidate)
+    candidate
+  }, character(1), USE.NAMES = FALSE)
+}
+
+# Write one workbook with a worksheet per contrast plus an "_index" key sheet that
+# maps the (possibly truncated) sheet name back to the full contrast name. When
+# significant_only = TRUE each sheet is filtered to genes passing the adj.P/logFC
+# thresholds; contrasts with no significant genes keep a header-only sheet so the
+# workbook structure stays stable. write_xlsx failures (e.g. the file is open in
+# Excel on Windows) are downgraded to a warning rather than aborting the stage.
+write_contrast_excel <- function(results_table, excel_path, method_label, significant_only = FALSE) {
+  contrast_names <- names(results_table)
+  sheet_names <- make_excel_sheet_names(contrast_names)
+
+  sheets <- lapply(seq_along(results_table), function(i) {
+    df <- as.data.frame(results_table[[i]])
+    df <- cbind(gene_name = rownames(df), df, stringsAsFactors = FALSE)
+    rownames(df) <- NULL
+    if (isTRUE(significant_only)) {
+      keep <- !is.na(df$adj.P.Val) & !is.na(df$logFC) &
+        df$adj.P.Val < params$adj_p_cutoff & abs(df$logFC) > params$logFC_cutoff
+      df <- df[keep, , drop = FALSE]
+    }
+    df
+  })
+  names(sheets) <- sheet_names
+
+  index_sheet <- tibble::tibble(
+    sheet_name = sheet_names,
+    contrast = as.character(contrast_names),
+    n_genes = vapply(sheets, nrow, integer(1))
+  )
+
+  workbook <- c(list(`_index` = index_sheet), sheets)
+
+  tryCatch(
+    {
+      writexl::write_xlsx(workbook, path = excel_path)
+      message("[", method_label, "] Excel export written: ", excel_path)
+    },
+    error = function(e) {
+      warning(
+        "[", method_label, "] Could not write Excel workbook '", excel_path, "': ",
+        conditionMessage(e), ". If the file is open in Excel, close it and re-run.",
+        call. = FALSE
+      )
+    }
+  )
+  invisible(excel_path)
+}
+
+# Save method outputs (tables + DE statistics + gene lists) in a consistent file layout.
+# In stage 5 we intentionally avoid manuscript-style plotting; figures are produced in stage 6.
+save_method_outputs <- function(results_table, method_label, data_for_plots = NULL) {
+  results_table <- sanitize_results_table(results_table, method_label = method_label)
+  if (length(results_table) == 0) {
+    warning("No valid results to save for ", method_label, " after NA filtering.")
+    return(invisible(list(summary = data.frame(), de_genes = character(0), stats = data.frame())))
+  }
+
+  summary_df <- purrr::imap_dfr(results_table, function(tbl, contrast_name) {
+    tbl <- as.data.frame(tbl)
+    sig_tbl <- tbl[tbl$adj.P.Val < params$adj_p_cutoff & abs(tbl$logFC) > params$logFC_cutoff, , drop = FALSE]
+    tibble::tibble(
+      method = method_label,
+      contrast = contrast_name,
+      n_tested = nrow(tbl),
+      n_sig = nrow(sig_tbl),
+      n_up = sum(sig_tbl$logFC > 0, na.rm = TRUE),
+      n_down = sum(sig_tbl$logFC < 0, na.rm = TRUE)
+    )
+  })
+
+  readr::write_csv(summary_df, path(out_results_de, paste0(method_label, "_res_summary.csv")))
+  saveRDS(results_table, file = path(out_results_de, paste0(method_label, "_results.RDS")))
+
+  # Per-contrast Excel exports so users can browse results or send them to a
+  # collaborator without importing the RDS into R. One worksheet per contrast plus
+  # an _index key sheet. The full workbook keeps every tested gene; the
+  # significant-only workbook keeps genes passing the adj.P/logFC thresholds.
+  write_contrast_excel(
+    results_table, path(out_results_de, paste0(method_label, "_results.xlsx")),
+    method_label, significant_only = FALSE
+  )
+  write_contrast_excel(
+    results_table, path(out_results_de, paste0(method_label, "_results_significant.xlsx")),
+    method_label, significant_only = TRUE
+  )
+
+  # Carry each contrast's gene names from its own rownames before binding, rather
+  # than recovering them from rbind-mangled "<contrast>.<gene>" rownames with a
+  # greedy gsub (which truncated any gene/target name containing a dot, e.g.
+  # "HLA.DRB1" -> "DRB1").
+  de_genes <- dplyr::bind_rows(lapply(results_table, function(df) {
+    df$gene_name <- rownames(df)
+    df
+  }))
+  de_genes <- unique(de_genes[de_genes$adj.P.Val < params$adj_p_cutoff & abs(de_genes$logFC) > params$logFC_cutoff, ]$gene_name)
+  saveRDS(de_genes, file = path(out_results_de, paste0(method_label, "_DE_genes.RDS")))
+
+  method_stats <- tibble::tibble(
+    method = method_label,
+    n_contrasts = length(results_table),
+    n_genes_passing_threshold = length(de_genes),
+    adj_p_cutoff = params$adj_p_cutoff,
+    logFC_cutoff = params$logFC_cutoff
+  )
+  readr::write_csv(method_stats, path(out_results_de, paste0(method_label, "_method_stats.csv")))
+
+  message(
+    sprintf(
+      "[%s] completed successfully: %d contrasts processed; %d genes pass adj.P.Val < %.3f and |logFC| > %.3f.",
+      method_label,
+      method_stats$n_contrasts,
+      method_stats$n_genes_passing_threshold,
+      params$adj_p_cutoff,
+      params$logFC_cutoff
+    )
+  )
+
+  invisible(list(summary = summary_df, de_genes = de_genes, stats = method_stats))
+}
+
+model_input_audit_row <- function(
+  branch,
+  obj,
+  assay_name,
+  transform = "identity",
+  transform_label = "none",
+  prior_count = 0,
+  matrix_summarised = "model matrix",
+  input_role = ""
+) {
+  raw_mat <- prepare_model_expression_matrix(
+    obj,
+    assay_name = assay_name,
+    transform = transform,
+    prior_count = prior_count,
+    context = paste(branch, "audit input"),
+    clean_na = FALSE
+  )
+  model_mat <- drop_rows_with_na(raw_mat, context = paste(branch, "audit input"))
+  finite_values <- as.numeric(model_mat[is.finite(model_mat)])
+
+  tibble::tibble(
+    branch = branch,
+    object_class = paste(class(obj), collapse = ", "),
+    assay_used = assay_name,
+    transformation_applied = transform_label,
+    matrix_summarised = matrix_summarised,
+    dimensions = paste(nrow(model_mat), ncol(model_mat), sep = " x "),
+    min = if (length(finite_values) > 0) round(min(finite_values), 4) else NA_real_,
+    median = if (length(finite_values) > 0) round(stats::median(finite_values), 4) else NA_real_,
+    max = if (length(finite_values) > 0) round(max(finite_values), 4) else NA_real_,
+    integer_like = matrix_is_integer_like(model_mat),
+    na_count = sum(is.na(raw_mat)),
+    rows_removed_for_na = nrow(raw_mat) - nrow(model_mat),
+    input_role = input_role
+  )
+}
+
+model_covariate_type <- function(covariate_name, covariate_spec) {
+  if (covariate_name %in% covariate_spec$continuous) return("continuous_numeric")
+  if (covariate_name %in% covariate_spec$categorical) return("categorical_factor")
+  "not_requested"
+}
+
+count_numeric_parse_failures <- function(x) {
+  raw_chr <- trimws(as.character(x))
+  raw_missing <- is.na(x) | is.na(raw_chr) | !nzchar(raw_chr)
+  parsed <- suppressWarnings(as.numeric(raw_chr))
+  sum(!raw_missing & is.na(parsed))
+}
+
+model_covariate_audit_rows <- function(obj, object_name, covariate_spec, group_col = model_group_col) {
+  pd_raw <- get_pheno(obj)
+  pd_model <- prepare_model_metadata(pd_raw, covariate_spec)
+  validate_model_covariates(pd_model, covariate_spec)
+  design_info <- build_limma_design(pd_model, covariate_spec, group_col = group_col)
+  design <- design_info$design
+  covariates <- model_covariate_names(covariate_spec)
+
+  if (length(covariates) == 0) {
+    return(tibble::tibble(
+      object_name = object_name,
+      formula_text = design_info$formula_text,
+      covariate = "None",
+      requested_type = "none",
+      imported_class = NA_character_,
+      model_class = NA_character_,
+      n_samples = nrow(pd_model),
+      n_missing_after_preparation = NA_integer_,
+      n_distinct_observed = NA_integer_,
+      numeric_parse_failures = NA_integer_,
+      design_columns = paste(colnames(design), collapse = ", "),
+      model_role = "No additional fixed-effect covariates requested; model includes the DE group only.",
+      interpretation = "Default fixed-effect design. Review the DE group columns and contrast table before fitting."
+    ))
+  }
+
+  design_assign <- attr(design, "assign")
+  purrr::map_dfr(seq_along(covariates), function(i) {
+    cov <- covariates[[i]]
+    requested_type <- model_covariate_type(cov, covariate_spec)
+    term_index <- i + 1
+    encoded_columns <- colnames(design)[design_assign == term_index]
+    is_continuous <- identical(requested_type, "continuous_numeric")
+
+    tibble::tibble(
+      object_name = object_name,
+      formula_text = design_info$formula_text,
+      covariate = cov,
+      requested_type = requested_type,
+      imported_class = paste(class(pd_raw[[cov]]), collapse = ", "),
+      model_class = paste(class(pd_model[[cov]]), collapse = ", "),
+      n_samples = nrow(pd_model),
+      n_missing_after_preparation = sum(is.na(pd_model[[cov]])),
+      n_distinct_observed = dplyr::n_distinct(stats::na.omit(pd_model[[cov]])),
+      numeric_parse_failures = if (is_continuous) count_numeric_parse_failures(pd_raw[[cov]]) else NA_integer_,
+      design_columns = paste(encoded_columns, collapse = ", "),
+      model_role = if (is_continuous) {
+        "Continuous adjustment term; expected to contribute one numeric design column."
+      } else {
+        "Categorical adjustment term; expected to contribute factor-expanded design column(s)."
+      },
+      interpretation = if (is_continuous) {
+        "Confirm that this is a measured numeric covariate, such as age, and not a coded group label."
+      } else {
+        "Confirm that these levels represent intended adjustment groups and are not continuous measurements stored as text."
+      }
+    )
+  })
+}
+```
+
+This section loads the inputs, prepares metadata, and writes diagnostics before any model fitting starts.
+If execution fails here, inspect the generated path settings, metadata column names, and low-power diagnostics first.
+
+```{r}
+#| label: load-inputs
+#| message: false
+# input loading can emit expected class/version warnings from serialized objects.
+#| warning: false
+
+# Load all expression objects needed for method/normalisation comparisons.
+geodiff_input_exists <- file_exists(geodiff_input_path)
+norm_geodiff_input_exists <- file_exists(norm_geodiff_input_path)
+
+de_input_status <- tibble::tibble(
+  Input = c("GeoDiff-filtered count object", "Q3/negative-probe normalised object", "GeoDiff-normalized object", "TMM normalised object"),
+  Required_for_non_geodiff_de = c("No", "Yes", "No", "Yes"),
+  Path = c(geodiff_input_path, norm_input_path, norm_geodiff_input_path, norm_tmm_input_path),
+  File_found = c(geodiff_input_exists, file_exists(norm_input_path), norm_geodiff_input_exists, file_exists(norm_tmm_input_path)),
+  Action = c(
+    ifelse(geodiff_input_exists, "Available for dream_GeoDiffCounts and limma_voom_GeoDiff as GeoDiff-filtered count data.", "GeoDiff-filtered count-data DE branches will be skipped."),
+    "Used for limma_trend_Q3 and shared contrast setup. Stage 5 explicitly extracts the q_norm assay for modeling.",
+    ifelse(norm_geodiff_input_exists, "Available for limma_trend_GeoDiff and GeoDiff-normalized reference outputs; not used as voom count input.", "GeoDiff-normalized limma-trend branch will be skipped."),
+    "Used for limma_voom_TMM and shared contrast setup."
+  )
+)
+
+render_protocol_kable(
+  de_input_status,
+  caption = "Stage 5 input file availability. GeoDiff files are optional; when absent, GeoDiff-only DE branches are skipped and non-GeoDiff branches continue."
+)
+
+if (!geodiff_input_exists || !norm_geodiff_input_exists) {
+  missing_geodiff_inputs <- c(
+    if (!geodiff_input_exists) paste0("GeoDiff-filtered count data: ", geodiff_input_path),
+    if (!norm_geodiff_input_exists) paste0("GeoDiff-normalized assay object: ", norm_geodiff_input_path)
+  )
+  message(
+    "One or more optional GeoDiff input(s) were not found. ",
+    "Branches requiring those specific inputs will be skipped, while available non-GeoDiff and count-data branches will continue if selected. Missing: ",
+    paste(missing_geodiff_inputs, collapse = " ; ")
+  )
+}
+
+model_covariate_spec <- resolve_model_covariate_spec(
+  continuous = params$model_covariates_continuous,
+  categorical = params$model_covariates_categorical
+)
+
+bundle <- build_analysis_bundle(
+  geodiff_obj = if (geodiff_input_exists) readRDS(geodiff_input_path) else NULL,
+  q3_obj = readRDS(norm_input_path),
+  geodiff_norm_obj = if (norm_geodiff_input_exists) readRDS(norm_geodiff_input_path) else NULL,
+  tmm_obj = readRDS(norm_tmm_input_path),
+  contrast_file_path = contrast_file_path,
+  contrast_factor_col = contrast_factor,
+  model_group = model_group_col,
+  model_mode = params$model_mode,
+  min_samples_per_group = params$min_samples_per_group,
+  min_patients_per_group = params$min_patients_per_group,
+  auto_exclude_low_power = isTRUE(params$auto_exclude_low_power)
+)
+
+GeoDiff_data <- if (!is.null(bundle$geodiff)) add_grouping_id_column(bundle$geodiff, params$grouping_id_vars) else NULL
+Q3_norm_data <- add_grouping_id_column(bundle$q3, params$grouping_id_vars)
+GeoDiff_norm_data <- if (!is.null(bundle$geodiff_norm)) add_grouping_id_column(bundle$geodiff_norm, params$grouping_id_vars) else NULL
+TMM_norm_data <- add_grouping_id_column(bundle$tmm, params$grouping_id_vars)
+shared_levels <- bundle$shared_levels
+contrastTable <- bundle$contrast_table
+
+readr::write_tsv(contrastTable, path(out_tables, "contrast_table_expanded.tsv"))
+readr::write_csv(bundle$power_diagnostics, path(out_tables, "low_power_group_diagnostics.csv"))
+emit_parity_diagnostics(
+  bundle = bundle,
+  out_tables_dir = out_tables,
+  random_effect_var = params$random_effect_var,
+  contrast_file_path = contrast_file_path,
+  contrast_factor_col = contrast_factor,
+  model_group_col = model_group_col
+)
+
+de_run_configuration <- tibble::tibble(
+  Setting = c(
+    "Contrast factor",
+    "Internal modeling column",
+    "Contrast file in use",
+    "Model mode",
+    "Random intercept variable",
+    "Enabled DE methods",
+    "Continuous fixed-effect covariates",
+    "Categorical fixed-effect covariates",
+    "Q3 assay for limma-trend",
+    "GeoDiff assay for limma-trend",
+    "limma-trend prior count",
+    "voom between-array normalisation",
+    "Dream cache enabled",
+    "limma-voom cache enabled",
+    "limma-trend cache enabled",
+    "Low-power groups detected"
+  ),
+  Value = c(
+    contrast_factor,
+    model_group_col,
+    contrast_file_path,
+    params$model_mode,
+    ifelse(is.null(params$random_effect_var) || !nzchar(params$random_effect_var), "None", params$random_effect_var),
+    paste(requested_methods, collapse = ", "),
+    format_covariate_list(model_covariate_spec$continuous),
+    format_covariate_list(model_covariate_spec$categorical),
+    params$q3_norm_assay,
+    params$geodiff_norm_assay,
+    as.character(params$limma_trend_prior_count),
+    "none after edgeR::calcNormFactors(TMM)",
+    as.character(isTRUE(params$use_dream_cache)),
+    as.character(isTRUE(params$use_limma_voom_cache)),
+    as.character(isTRUE(params$use_limma_trend_cache)),
+    as.character(sum(bundle$power_diagnostics$low_power))
+  )
+)
+
+render_protocol_kable(
+  de_run_configuration,
+  caption = "Settings used for this Stage 5 run."
+)
+
+if (nrow(bundle$power_diagnostics) > 0) {
+  message("Low-power diagnostics written to tables directory.")
+}
+```
+
+### Covariate check
+
+Before fitting any model, review the table below to confirm how each requested covariate will be used.
+Continuous covariates should be treated as numeric variables. Categorical covariates should be treated as groups with separate model terms for their levels.
+
+::: {.callout-important}
+## Check continuous covariates before fitting
+Variables such as `age` should be numeric before they enter Stage 5. This notebook attempts numeric parsing for requested continuous covariates and stops if non-numeric values are present, but the protocol-preferred correction is to clean the source metadata in an earlier stage and rerun the staged workflow. That keeps the value used for modeling visible in the prepared metadata objects and avoids hidden one-off fixes.
+:::
+
+```{r covariate-encoding-audit}
+#| echo: false
+#| message: false
+#| warning: false
+
+covariate_audit_inputs <- list()
+
+if ("dream" %in% params$de_methods && !is.null(GeoDiff_data)) {
+  covariate_audit_inputs[["dream_GeoDiffCounts"]] <- GeoDiff_data
+}
+if ("limma-voom" %in% params$de_methods) {
+  covariate_audit_inputs[["limma_voom_TMM"]] <- TMM_norm_data
+}
+if ("limma-voom" %in% params$de_methods && !is.null(GeoDiff_data)) {
+  covariate_audit_inputs[["limma_voom_GeoDiff"]] <- GeoDiff_data
+}
+if ("limma-trend" %in% params$de_methods) {
+  covariate_audit_inputs[["limma_trend_Q3"]] <- Q3_norm_data
+}
+if ("limma-trend" %in% params$de_methods && !is.null(GeoDiff_norm_data)) {
+  covariate_audit_inputs[["limma_trend_GeoDiff"]] <- GeoDiff_norm_data
+}
+
+if (length(covariate_audit_inputs) > 0) {
+  covariate_encoding_audit <- purrr::imap_dfr(
+    covariate_audit_inputs,
+    ~ model_covariate_audit_rows(
+      obj = .x,
+      object_name = .y,
+      covariate_spec = model_covariate_spec,
+      group_col = model_group_col
+    )
+  )
+  readr::write_csv(covariate_encoding_audit, path(out_tables, "de_model_covariate_encoding_audit.csv"))
+  render_protocol_kable(
+    covariate_encoding_audit,
+    caption = "Stage 5 covariate check before model fitting. Review requested_type, imported_class, model_class, numeric_parse_failures, and design_columns before interpreting DE results."
+  )
+} else {
+  warning("No rows were generated for the covariate check. Check params$de_methods and input availability.")
+}
+```
+
+### Model input check
+
+Before fitting any DE model, review the table below to confirm that each branch uses the intended assay and transformation.
+Use this check to verify whether each branch receives raw counts, TMM-scaled counts for voom, or a transformed/normalized matrix for limma-trend.
+
+::: {.callout-important}
+## GeoDiff comparison scope
+GeoDiff-filtered count-data and GeoDiff-normalized branches use the GeoDiff-retained feature/segment universe. Differences between GeoDiff and non-GeoDiff DE outputs therefore reflect both the earlier-stage GeoDiff filtering decisions and the later normalization/modeling path. This is expected for this protocol and should be reported as a comparison of whole workflow paths, not of normalization alone.
+:::
+
+```{r model-input-audit}
+#| echo: false
+#| message: false
+#| warning: false
+
+model_input_audit_rows <- list()
+
+if ("dream" %in% params$de_methods && !is.null(GeoDiff_data)) {
+  model_input_audit_rows[["dream_GeoDiffCounts"]] <- model_input_audit_row(
+    branch = "dream_GeoDiffCounts",
+    obj = GeoDiff_data,
+    assay_name = "exprs",
+    transform_label = "edgeR::calcNormFactors(TMM), then voomWithDreamWeights",
+    matrix_summarised = "GeoDiff-filtered raw count matrix before dream/voom weighting",
+    input_role = "Mixed-model count branch using the GeoDiff-retained feature/segment universe."
+  )
+}
+
+if ("limma-voom" %in% params$de_methods) {
+  model_input_audit_rows[["limma_voom_TMM"]] <- model_input_audit_row(
+    branch = "limma_voom_TMM",
+    obj = TMM_norm_data,
+    assay_name = "counts",
+    transform_label = "edgeR::calcNormFactors(TMM), then limma::voom(normalize.method = 'none')",
+    matrix_summarised = "raw count matrix before voom",
+    input_role = "Count branch using TMM scaling factors without additional voom quantile normalization."
+  )
+}
+
+if ("limma-voom" %in% params$de_methods && !is.null(GeoDiff_data)) {
+  model_input_audit_rows[["limma_voom_GeoDiff"]] <- model_input_audit_row(
+    branch = "limma_voom_GeoDiff",
+    obj = GeoDiff_data,
+    assay_name = "exprs",
+    transform_label = "edgeR::calcNormFactors(TMM), then limma::voom(normalize.method = 'none')",
+    matrix_summarised = "GeoDiff-filtered raw count matrix before voom",
+    input_role = "Count branch using the GeoDiff-retained feature/segment universe; it does not use GeoDiff normmat as voom input."
+  )
+}
+
+if ("limma-trend" %in% params$de_methods) {
+  model_input_audit_rows[["limma_trend_Q3"]] <- model_input_audit_row(
+    branch = "limma_trend_Q3",
+    obj = Q3_norm_data,
+    assay_name = params$q3_norm_assay,
+    transform = "log2_plus_prior",
+    prior_count = params$limma_trend_prior_count,
+    transform_label = paste0("log2(", params$q3_norm_assay, " + ", params$limma_trend_prior_count, ")"),
+    matrix_summarised = "log2 Q3-normalized expression matrix passed to lmFit",
+    input_role = "limma-trend branch using the stage 3 Q3-normalized assay."
+  )
+}
+
+if ("limma-trend" %in% params$de_methods && !is.null(GeoDiff_norm_data)) {
+  model_input_audit_rows[["limma_trend_GeoDiff"]] <- model_input_audit_row(
+    branch = "limma_trend_GeoDiff",
+    obj = GeoDiff_norm_data,
+    assay_name = params$geodiff_norm_assay,
+    transform = "identity",
+    transform_label = paste0(params$geodiff_norm_assay, " used directly; GeoDiff output is already log-scale"),
+    matrix_summarised = "GeoDiff-normalized expression matrix passed to lmFit",
+    input_role = "limma-trend branch using the stage 3 GeoDiff-normalized assay."
+  )
+}
+
+if (length(model_input_audit_rows) > 0) {
+  model_input_audit <- dplyr::bind_rows(model_input_audit_rows)
+  readr::write_csv(model_input_audit, path(out_tables, "de_model_input_audit.csv"))
+  render_protocol_kable(
+    model_input_audit,
+    caption = "Stage 5 model input check before fitting. Review assay_used, transformation_applied, integer_like, and na_count before interpreting DE results."
+  )
+} else {
+  warning("No rows were generated for the model input check. Check params$de_methods and input availability.")
+}
+```
+
+### Contrast specification guidance
+
+The contrast file is expected to contain exactly three columns named `factor`, `numerator`, and `denominator`.
+The `factor` value must match `params$contrast_factor`.
+The default `contrast_factor: "Annotation"` uses the generated `<cell_type>_<disease_status>` fallback, but users can set this to any metadata column that already defines the groups they want to compare.
+Place contrast files in `Data/` and set `contrast_file` to the filename, for example `contrast_file: "contrasts.txt"`.
+When `model_mode` is `one_vs_rest_mixed`, contrasts are generated automatically if the contrast file path is blank.
+When `model_mode` is `pairwise_mixed`, provide explicit numerator/denominator rows whose values are present in the selected contrast factor after `make.names()` sanitization.
+The parser reads tab-delimited text first and falls back to comma-delimited input with a warning if needed, so users can keep a `.txt` extension without changing pipeline code.
+
+For the default fallback, `Data/contrasts.txt` can contain rows such as `Annotation    Acinar_Tumor    Acinar_Healthy`.
+For a user-defined metadata column, set `contrast_factor` to that column name and use the same value in the contrast file, for example `disease_celltype    tumor_duct    control_duct`.
+
+The `build_analysis_bundle()` step above prepares the analysis inputs for this notebook.
+It keeps metadata preparation, shared-level eligibility filtering, and contrast expansion in one place before any model starts.
+Immediately after the inputs are assembled, `emit_parity_diagnostics()` writes object/class/group/contrast diagnostics to `out_tables` so users can review input consistency from files instead of only console output.
+
+# DE genes for configured contrasts
+
+This section performs DE model fitting and exports method outputs (results tables, DE gene lists, and summary statistics) for visualisation in `6_Differential_Expression_Visualisation.qmd`.
+
+```{r}
+#| label: initialise-method-skip-log
+#| message: false
+#| warning: false
+
+skipped_method_rows <- list()
+record_skipped_method <- function(method_name, reason) {
+  skipped_method_rows[[method_name]] <<- tibble::tibble(
+    method = method_name,
+    status = "skipped",
+    reason = reason
+  )
+  message(reason)
+}
+
+```
+
+## Dream
+
+### Starting from GeoDiff-filtered count data
+
+Dream is retained as the heavier mixed-model option in this protocol workflow and is active by default so users can compare it directly against limma-trend and limma-voom.
+It fits one global model over the selected DE groups using the Stage 2 GeoDiff-filtered count data, applies the same typed fixed-effect covariates requested in the YAML, and applies the same expanded contrast expressions written to `contrast_table_expanded.tsv`.
+Dream, limma-trend, and limma-voom therefore report matching contrast names and test the same contrast definitions, with the same continuous and categorical fixed-effect adjustment terms when those terms are configured.
+
+```{r}
+#| message: true
+# dream fitting can produce known optimizer warnings that are tracked in exported diagnostics.
+#| warning: false
+
+if ("dream" %in% params$de_methods && !is.null(GeoDiff_data)) {
+  dream_results_table <- run_dream(
+    obj = GeoDiff_data,
+    contrastTable = contrastTable,
+    random_effect_var = params$random_effect_var,
+    cache_path = path(out_results_de, "dream_results.RDS"),
+    model_covariate_spec = model_covariate_spec,
+    use_cache = isTRUE(params$use_dream_cache),
+    allow_random_slope = isTRUE(params$allow_random_slope),
+    seed = params$seed,
+    branch_label = "dream"
+  )
+  dream_saved <- save_method_outputs(
+    dream_results_table,
+    "dream",
+    data_for_plots = if (!is.null(GeoDiff_norm_data)) GeoDiff_norm_data else GeoDiff_data
+  )
+} else if ("dream" %in% params$de_methods) {
+  record_skipped_method(
+    "dream_GeoDiffCounts",
+    paste(
+      "GeoDiff-filtered count-data branch skipped: the GeoDiff-filtered count object was not found for dream_GeoDiffCounts.",
+      "dream uses the GeoDiff-filtered counts only; GeoDiff normalization is not required for this branch.",
+      "Non-GeoDiff DE methods will continue if selected and their inputs are available."
+    )
+  )
+}
+```
+
+## Limma (with duplicate correlation)
+
+### limma-voom on TMM-scaled count data
+
+This voom branch starts from raw count values carried by the stage 3 TMM `DGEList`. `edgeR::calcNormFactors()` supplies TMM scaling factors, and `voom(normalize.method = "none")` avoids applying an additional quantile normalization step.
+
+```{r}
+if ("limma-voom" %in% params$de_methods) {
+  limma_voom_TMM_results_table <- run_or_load_method_cache(
+    cache_path = path(out_results_de, "limma_voom_TMM_results.RDS"),
+    expected_contrasts = as.character(contrastTable$contrast_expr),
+    use_cache = resolve_model_cache_setting(
+      use_cache = params$use_limma_voom_cache,
+      method_label = "limma-voom:TMM",
+      covariate_spec = model_covariate_spec
+    ),
+    method_label = "limma-voom:TMM",
+    fit_fn = function() run_limma_voom(
+      TMM_norm_data,
+      contrastTable,
+      params$random_effect_var,
+      model_covariate_spec = model_covariate_spec,
+      branch_label = "limma_voom_TMM"
+    )
+  )
+  limma_voom_TMM_saved <- save_method_outputs(limma_voom_TMM_results_table, "limma_voom_TMM", data_for_plots = TMM_norm_data)
+}
+```
+
+### limma-voom on GeoDiff-filtered count data
+
+This branch applies voom to raw count values after GeoDiff segment/feature filtering. It does **not** use the GeoDiff `normmat` assay as voom input because voom expects count-like data; the GeoDiff-normalized `normmat` assay is reserved for the limma-trend GeoDiff branch.
+
+```{r}
+if ("limma-voom" %in% params$de_methods && !is.null(GeoDiff_data)) {
+  limma_voom_GeoDiff_results_table <- run_or_load_method_cache(
+    cache_path = path(out_results_de, "limma_voom_GeoDiff_results.RDS"),
+    expected_contrasts = as.character(contrastTable$contrast_expr),
+    use_cache = resolve_model_cache_setting(
+      use_cache = params$use_limma_voom_cache,
+      method_label = "limma-voom:GeoDiff-filtered counts",
+      covariate_spec = model_covariate_spec
+    ),
+    method_label = "limma-voom:GeoDiff-filtered counts",
+    fit_fn = function() run_limma_voom(
+      GeoDiff_data,
+      contrastTable,
+      params$random_effect_var,
+      model_covariate_spec = model_covariate_spec,
+      branch_label = "limma_voom_GeoDiff"
+    )
+  )
+  limma_voom_GeoDiff_saved <- save_method_outputs(
+    limma_voom_GeoDiff_results_table,
+    "limma_voom_GeoDiff",
+    data_for_plots = if (!is.null(GeoDiff_norm_data)) GeoDiff_norm_data else GeoDiff_data
+  )
+} else if ("limma-voom" %in% params$de_methods) {
+  record_skipped_method(
+    "limma_voom_GeoDiff",
+    paste(
+      "GeoDiff-filtered count-data DE branch skipped: GeoDiff-filtered count object was not found for limma_voom_GeoDiff.",
+      "limma_voom_TMM will continue if selected and its TMM input is available.",
+      "Expected GeoDiff-filtered count object path:",
+      geodiff_input_path
+    )
+  )
+}
+```
+
+### limma-trend on Q3 normalised data
+
+limma-trend is the lightweight baseline and is expected to run reliably in most environments. This branch explicitly extracts the stage 3 Q3 assay and applies the configured log2 prior-count transform before `lmFit()`.
+
+```{r}
+if ("limma-trend" %in% params$de_methods) {
+  limma_trend_Q3_results_table <- run_or_load_method_cache(
+    cache_path = path(out_results_de, "limma_trend_Q3_results.RDS"),
+    expected_contrasts = as.character(contrastTable$contrast_expr),
+    use_cache = resolve_model_cache_setting(
+      use_cache = params$use_limma_trend_cache,
+      method_label = "limma-trend:Q3",
+      covariate_spec = model_covariate_spec
+    ),
+    method_label = "limma-trend:Q3",
+    fit_fn = function() run_limma_trend(
+      Q3_norm_data,
+      contrastTable,
+      params$random_effect_var,
+      model_covariate_spec = model_covariate_spec,
+      assay_name = params$q3_norm_assay,
+      transform = "log2_plus_prior",
+      prior_count = params$limma_trend_prior_count,
+      input_label = "limma-trend Q3 input",
+      branch_label = "limma_trend_Q3"
+    )
+  )
+  limma_trend_Q3_saved <- save_method_outputs(limma_trend_Q3_results_table, "limma_trend_Q3", data_for_plots = Q3_norm_data)
+}
+```
+
+### limma-trend on GeoDiff-normalized normmat data
+
+This branch explicitly extracts the GeoDiff `normmat` assay and passes it directly to limma-trend because GeoDiff writes this assay on the log-normalized scale.
+
+```{r}
+if ("limma-trend" %in% params$de_methods && !is.null(GeoDiff_norm_data)) {
+  limma_trend_GeoDiff_results_table <- run_or_load_method_cache(
+    cache_path = path(out_results_de, "limma_trend_GeoDiff_results.RDS"),
+    expected_contrasts = as.character(contrastTable$contrast_expr),
+    use_cache = resolve_model_cache_setting(
+      use_cache = params$use_limma_trend_cache,
+      method_label = "limma-trend:GeoDiff",
+      covariate_spec = model_covariate_spec
+    ),
+    method_label = "limma-trend:GeoDiff",
+    fit_fn = function() run_limma_trend(
+      GeoDiff_norm_data,
+      contrastTable,
+      params$random_effect_var,
+      model_covariate_spec = model_covariate_spec,
+      assay_name = params$geodiff_norm_assay,
+      transform = "identity",
+      input_label = "limma-trend GeoDiff input",
+      branch_label = "limma_trend_GeoDiff"
+    )
+  )
+  limma_trend_GeoDiff_saved <- save_method_outputs(limma_trend_GeoDiff_results_table, "limma_trend_GeoDiff", data_for_plots = GeoDiff_norm_data)
+} else if ("limma-trend" %in% params$de_methods) {
+  record_skipped_method(
+    "limma_trend_GeoDiff",
+    paste(
+      "GeoDiff-normalized limma-trend branch skipped: GeoDiff-normalized object was not found for limma_trend_GeoDiff.",
+      "limma_trend_Q3 will continue if selected and its Q3 input is available.",
+      "Expected GeoDiff-normalized object path:",
+      norm_geodiff_input_path
+    )
+  )
+}
+```
+
+## Mean-variance diagnostics
+
+These are standard mean-variance diagnostics for the model-fitting methods. They are
+shown here because the fitted objects only exist during calculation; they flag
+unexpected behaviour (for example a strong low-count hook) before you move on to
+interpretation in `6_Differential_Expression_Visualisation.qmd`.
+
+::: {.callout-note}
+## What these plots show
+For **limma-voom**, the plot shows each gene's residual standard deviation
+(`sqrt(standard deviation)`) against its mean log2 count; the fitted red curve is the
+mean-variance trend voom uses to assign precision weights. A smooth, monotonically
+decreasing curve indicates count heteroscedasticity has been modelled well, whereas a
+strong hook at low expression suggests under-filtered low-count genes. For
+**limma-trend**, `plotSA` shows each gene's residual standard deviation against
+average log-expression with the empirical-Bayes trend line; a gentle, stable trend
+confirms that `trend = TRUE` is appropriate. The **dream** panel is the
+`voomWithDreamWeights` mean-variance trend (random-intercept form).
+:::
+
+```{r}
+#| label: mean-variance-diagnostics
+#| results: asis
+#| echo: false
+#| warning: false
+
+meanvar_branches <- list(
+  "limma_voom_TMM"      = exists("limma_voom_TMM_saved"),
+  "limma_voom_GeoDiff"  = exists("limma_voom_GeoDiff_saved"),
+  "limma_trend_Q3"      = exists("limma_trend_Q3_saved"),
+  "limma_trend_GeoDiff" = exists("limma_trend_GeoDiff_saved"),
+  "dream"               = exists("dream_saved")
+)
+active_branches <- names(meanvar_branches)[vapply(meanvar_branches, isTRUE, logical(1))]
+
+if (length(active_branches) == 0) {
+  cat("\n::: {.callout-note}\nNo DE methods produced a fitted model in this run, so no mean-variance diagnostics are available.\n:::\n\n")
+} else {
+  # Present one tab per active DE branch (normalisation + method combination).
+  # Each tab shows that branch's mean-variance diagnostic with a numbered figure
+  # legend rendered below the image.
+  cat("\n::: {.panel-tabset}\n")
+  for (mv_branch in active_branches) {
+    mv_png <- protocol_contract_path(
+      out_figures_de,
+      paste0("meanvar_", sanitize_col_name(mv_branch, "branch"), ".png"),
+      portable_path_limit,
+      paste0("Stage 5 mean-variance diagnostic (", mv_branch, ")")
+    )
+    fig_label <- paste0("fig-meanvar-", gsub("_", "-", tolower(mv_branch)))
+    cat(sprintf("\n\n### %s\n\n", mv_branch))
+    if (file_exists(mv_png)) {
+      cat(sprintf(
+        "![Mean-variance trend diagnostic for the `%s` DE branch. Each point is a gene's residual standard deviation against its mean expression; a smooth, monotonic trend indicates the gene-level mean-variance relationship is well modelled, whereas a strong hook at low expression flags under-filtered low-count genes.](%s){#%s}\n\n",
+        mv_branch, fs::path_rel(mv_png, start = root), fig_label
+      ))
+    } else {
+      cat(
+        "::: {.callout-note}\n",
+        sprintf("Mean-variance diagnostic for `%s` was not regenerated in this run. ", mv_branch),
+        "This is expected when cached results were loaded (set the matching `use_*_cache` parameter to `false` to refit and refresh the figure), or if the diagnostic could not be drawn.\n",
+        ":::\n\n",
+        sep = ""
+      )
+    }
+  }
+  cat("\n:::\n\n")
+}
+```
+
+## Calculation summary for users
+
+This section prints a compact execution summary that confirms which model/input combinations completed and how many genes passed the configured DE thresholds.
+The rendered table and exported files are the inputs for `6_Differential_Expression_Visualisation.qmd`.
+
+### Output legend for external users (stage 5 files used by stage 6)
+
+Use the guide below to decide whether your run is ready for interpretation visualisation in `6_Differential_Expression_Visualisation.qmd`.
+
+- `*_results.RDS`: full contrast-level model output tables.
+  **Interpretation cue:** use these as the authoritative source for effect sizes and adjusted p-values.
+- `*_results.xlsx`: the same per-contrast tables as an Excel workbook, one worksheet per contrast (see the `_index` sheet for the sheet-name → full-contrast key). `*_results_significant.xlsx` has the identical layout but each sheet is filtered to genes passing `adj_p_cutoff`/`logFC_cutoff`.
+  **Interpretation cue:** browse or share these without importing the RDS into R; the RDS remains the authoritative object for downstream R workflows.
+- `*_res_summary.csv`: per-contrast counts of significant genes split into upregulated and downregulated sets.  
+  **Interpretation cue:** check for extremely imbalanced or near-zero counts before trusting visual trends.
+- `*_DE_genes.RDS`: de-duplicated significant gene list per method.  
+  **Interpretation cue:** this is useful for overlap/enrichment workflows, but not a replacement for contrast-level tables.
+- `*_method_stats.csv` and `method_stats_summary.csv`: short run summaries that show the thresholds used.
+  **Interpretation cue:** confirm thresholds (`adj_p_cutoff`, `logFC_cutoff`) match manuscript intent before proceeding to stage 6.
+
+If any active method exports empty or near-empty summaries, review covariates/contrasts and low-power diagnostics in this notebook before running stage 6.
+
+```{r}
+method_stats_rows <- list()
+
+if (exists("dream_saved")) method_stats_rows[["dream"]] <- dream_saved$stats
+if (exists("limma_voom_TMM_saved")) method_stats_rows[["limma_voom_TMM"]] <- limma_voom_TMM_saved$stats
+if (exists("limma_voom_GeoDiff_saved")) method_stats_rows[["limma_voom_GeoDiff"]] <- limma_voom_GeoDiff_saved$stats
+if (exists("limma_trend_Q3_saved")) method_stats_rows[["limma_trend_Q3"]] <- limma_trend_Q3_saved$stats
+if (exists("limma_trend_GeoDiff_saved")) method_stats_rows[["limma_trend_GeoDiff"]] <- limma_trend_GeoDiff_saved$stats
+
+if (length(method_stats_rows) > 0) {
+  method_stats_summary <- dplyr::bind_rows(method_stats_rows) %>%
+    dplyr::arrange(dplyr::desc(n_genes_passing_threshold))
+
+  readr::write_csv(method_stats_summary, path(out_results_de, "method_stats_summary.csv"))
+  message("Calculation summary written to: ", path(out_results_de, "method_stats_summary.csv"))
+  render_protocol_kable(
+    method_stats_summary,
+    caption = "Stage 5 per-method run summary used to check the fitted DE outputs."
+  )
+} else {
+  warning("No method outputs were detected. Check params$de_methods and input files from earlier stages.")
+}
+
+if (length(skipped_method_rows) > 0) {
+  skipped_method_summary <- dplyr::bind_rows(skipped_method_rows)
+  readr::write_csv(skipped_method_summary, path(out_results_de, "method_skip_summary.csv"))
+  render_protocol_kable(
+    skipped_method_summary,
+    caption = "Stage 5 skipped-method summary. GeoDiff-filtered count-data and GeoDiff-normalized branches are skipped when their required optional files are absent."
+  )
+  message("Skipped-method summary written to: ", path(out_results_de, "method_skip_summary.csv"))
+}
+```
+
+## Model/contrast inventory export
+
+This table maps each active model/input combination to available contrasts and tested gene counts for later notebooks.
+
+```{r}
+method_results <- list()
+if (exists("dream_results_table")) method_results[["dream_GeoDiffCounts"]] <- dream_results_table
+if (exists("limma_voom_TMM_results_table")) method_results[["limma_voom_TMM"]] <- limma_voom_TMM_results_table
+if (exists("limma_voom_GeoDiff_results_table")) method_results[["limma_voom_GeoDiff"]] <- limma_voom_GeoDiff_results_table
+if (exists("limma_trend_Q3_results_table")) method_results[["limma_trend_Q3"]] <- limma_trend_Q3_results_table
+if (exists("limma_trend_GeoDiff_results_table")) method_results[["limma_trend_GeoDiff"]] <- limma_trend_GeoDiff_results_table
+
+if (length(method_results) > 0) {
+  model_contrast_inventory <- purrr::imap_dfr(method_results, function(res_list, model_name) {
+    tibble::tibble(
+      model = model_name,
+      contrast = names(res_list),
+      n_genes_tested = purrr::map_int(res_list, nrow)
+    )
+  })
+  readr::write_csv(model_contrast_inventory, path(out_results_de, "model_contrast_inventory.csv"))
+  render_protocol_kable(
+    model_contrast_inventory,
+    caption = "Stage 5 model and contrast inventory exported for later visualisation notebooks."
+  )
+}
+```
+
+## Pipeline output list
+
+The output list summarises all method outputs, result tables, and figures generated by this report so later notebooks and protocol reviewers can check the files produced by this render.
+
+```{r}
+output_list <- tibble::tibble(
+  output_path = c(
+    fs::dir_ls(out_results_de, recurse = TRUE, type = "file"),
+    fs::dir_ls(out_tables, recurse = TRUE, type = "file"),
+    fs::dir_ls(out_figures_de, recurse = TRUE, type = "file")
+  )
+) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(output_rel = fs::path_rel(output_path, start = root)) %>%
+  dplyr::arrange(output_rel)
+
+readr::write_csv(output_list, path(out_tables, "output_list.csv"))
+
+render_protocol_kable(
+  utils::head(output_list, 30),
+  caption = "First rows of the stage 5 output list"
+)
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

@@ -1,0 +1,1694 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "Exploratory Data Analysis"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+    include-in-header:
+      text: |
+        <style>
+        :root {
+          --bs-body-font-family: "Segoe UI", Arial, sans-serif;
+          --bs-font-sans-serif: "Segoe UI", Arial, sans-serif;
+          --bs-code-font-family: "Segoe UI", Arial, sans-serif;
+          --bs-font-monospace: "Segoe UI", Arial, sans-serif;
+        }
+        html,
+        body,
+        body *:not(svg):not(svg *),
+        .sourceCode,
+        .sourceCode *,
+        .cell-output,
+        .cell-output *,
+        .cell-output-display,
+                .cell-output-display *,
+        .dataTables_wrapper,
+        .dataTables_wrapper *,
+        #TOC,
+        #TOC * {
+          font-family: "Segoe UI", Arial, sans-serif !important;
+        }
+        </style>
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+
+params:
+  # Root, same convention as QC / GeoDiff / Norm
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+
+  # Fixed folder names under root
+  dir_outputs: "Outputs"
+  dir_src: "src"
+
+  # Utility functions in the project-level src directory
+  utility_functions_r: "utilityFunctions.R"
+
+  # Inputs, coming from Normalisation stage
+  norm_stage: "3_Norm"
+  norm_results_dir: "results"
+  rds_normalised: "normalised_spatial_data.RDS"
+  rds_geodiff_norm: "GeoDiff_normalised_spatial_data.RDS"
+  rds_tmm_norm: "TMM_normalised_spatial_data.RDS"
+
+  # Outputs for this stage
+  out_stage: "4_EDA"
+  out_results: "results"
+  out_tables: "tables"
+  out_figures: "figures"
+
+  # Save toggles
+  save_plots: true
+  save_rds: false
+  save_tables: false
+
+  # Optional filename prefix for sensitivity runs
+  plot_prefix: ""
+
+  # ---- Metadata role-column mapping (param-driven) ----
+  # These name the sample-metadata (pData) columns used for the PCA / pairs-plot
+  # ROLES: primary grouping, segment, patient, and slide/batch. They mirror the
+  # col_* params used in stages 5 and 6, so the same column is configured the
+  # same way across the pipeline.
+  #
+  # How resolution works: for each role the notebook tries the value you set here
+  # FIRST, then falls back to the built-in canonical names. The defaults below
+  # therefore work out of the box on datasets that use the canonical headers, and
+  # you adapt to a new dataset by editing ONLY these values - no code edits needed.
+  # Example: a cohort whose condition column is named "disease" instead of
+  # "disease_status" sets `col_disease_status: "disease"`. A cohort with no
+  # cell_type column can point `col_cell_type` at its segment column as a proxy.
+  col_slide: "slide_name"               # slide / batch identifier
+  col_patient: "patient_id"             # patient / subject identifier
+  col_disease_status: "disease_status"  # primary study grouping (condition)
+  col_cell_type: "cell_type"            # cell-type annotation
+  col_segment: "segment"                # segment / region-of-interest type
+
+  # Metadata column headers used in EDA (single place to edit for new datasets).
+  # These study covariates are resolved and inspected in the eigencorrelation /
+  # metadata-correlation diagnostics (tolerant to spaces/newlines/punctuation).
+  # NOTE: this list feeds the covariate DIAGNOSTICS; the PCA/pairs-plot grouping
+  # ROLES are set separately by the col_* params above.
+  metadata_columns: ["slide_name", "segment", "location", "patient_id", "disease_status", "cell_type"]
+
+  # PCA panel settings
+  pca_scree_components: 20
+  pca_main_ncol: 2
+  pca_main_pair: [1, 2]
+  pca_secondary_pair: [3, 6]
+  pca_batch_pair: [1, 3]
+  pca_pairs_components: 6
+  # Compact PCA pairsplot styling; lower these values if axis text crowds small panels.
+  pca_pairs_point_size: 0.6
+  pca_pairs_axis_label_size: 7
+  pca_pairs_component_label_size: 11
+
+  # ---- Variance partition analysis ----
+  # variancePartition fits a mixed model per gene and reports the percentage of
+  # expression variance each study variable explains, drawn as a violin plot
+  # (one violin per variable, plus a Residuals violin for unexplained variance).
+  # Categorical variables are modelled as random effects (1|x); continuous
+  # variables enter as fixed numeric terms.
+  #
+  # How to adapt for a new dataset: list your categorical study variables under
+  # varpart_categorical and any measured numeric variables under varpart_continuous.
+  # Leave BOTH lists empty to auto-classify from `metadata_columns` (numeric columns
+  # become continuous, everything else categorical). Columns that are constant, or
+  # unique to a single segment (which would make a random effect meaningless), are
+  # dropped automatically with a message.
+  varpart_run: true
+  varpart_categorical:
+    value: ["segment", "slide_name", "region", "patient_id", "disease_status"]
+  varpart_continuous:
+    value: []
+  # Gene cap for speed. Mixed models are slow on many genes; 0 (or blank) uses all
+  # genes, while a positive number (for example 2000) uses only that many of the
+  # most variable genes.
+  varpart_max_genes: 0
+  # Reproducibility seed for the parallel mixed-model fits.
+  varpart_seed: 123
+---
+
+# Exploratory data analysis (4)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook is written for users applying the workflow to their own dataset. Read each section in order, confirm required inputs before running code sections, and use the YAML parameters at the top of the file to adapt paths and thresholds for your study design.
+:::
+
+::: {.callout-warning collapse="true"}
+## Before you run
+Validate input data and metadata column names first. Most runtime issues in protocol use are caused by path mismatches, missing files, or dataset-specific column naming differences.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+::: {.callout-caution collapse="true"}
+## Reproducibility caution
+When editing parameters, record exactly what changed (paths, thresholds, model options) in your run notes so later figures and conclusions can be reproduced during review and publication.
+:::
+
+This notebook runs the **exploratory data analysis (EDA) stage** for the normalised GeoMx datasets. Q3/TMM inputs are expected from Stage 3, while GeoDiff-normalized `normmat` inputs are optional.
+
+It generates principal component analysis (PCA)-based dimensionality-reduction views, metadata-covariate correlation panels, and method-wise comparison plots using consistent parameter-driven settings. If the GeoDiff-normalized object is absent, GeoDiff-only EDA sections are skipped with an explicit path-aware message and Q3/TMM sections continue.
+
+The objective is to document **what is being computed and why**. This notebook does not interpret cluster structure or biological outcomes.
+
+
+## How to interpret this stage
+
+Use this stage to make explicit, reproducible decisions before progressing:
+
+1. Confirm the key output objects/tables were produced without unexpected warnings.
+2. Review the stage figures in the context of your study design (technical quality, group balance, and model assumptions).
+3. Record your decision in run notes (for example: "acceptable", "rerun with adjusted parameters", or "exclude affected samples/groups") before moving to the next notebook.
+
+## Load libraries
+
+Load package dependencies for PCA workflows, plotting, and file handling.
+
+```{r load-libraries}
+#| output: false
+#| message: false
+#| warning: false
+# startup package warnings are expected and do not affect protocol runs.
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(tidyverse)
+library(cowplot)
+library(PCAtools) # pca & correlation plot
+library(viridis) # color schemes
+library(gplots)
+library(reshape2)
+library(RColorBrewer)
+library(wesanderson)
+library(edgeR)
+library(DESeq2)
+library(variancePartition) # variance partition mixed models
+library(BiocParallel)      # parallel backend for variancePartition
+library(fs)
+
+
+```
+
+## Setup paths and output helpers
+
+Resolve stage input/output paths from YAML params and define helper paths for figure output naming.
+
+```{r setup-paths}
+#| label: setup-paths
+#| output: false
+#| message: false
+#| warning: false
+# path setup emits benign warnings on some filesystems; keep notebook output clean.
+
+root <- params$project_root
+# Auto-detect root for interactive runs when YAML root is empty/default.
+if (is.null(root) || root == "" || root == ".") {
+  # YAML-aware fallback: use repository root discovered via here().
+  root <- path_abs(here::here())
+} else {
+  root <- path_abs(root)
+}
+
+# here()-first helper with explicit YAML-root override when provided.
+root_via_here <- path_abs(here::here())
+use_here_root <- identical(path_abs(root), root_via_here)
+project_path <- function(...) {
+  if (use_here_root) {
+    here::here(...)
+  } else {
+    path(root, ...)
+  }
+}
+
+# Shared source helpers
+dir_src <- project_path(params$dir_src)
+path_utilities_path <- path(dir_src, "pathUtilities.R")
+if (!file_exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+utility_functions_path <- path(dir_src, params$utility_functions_r)
+if (!file_exists(utility_functions_path)) {
+  stop(
+    "Required helper file not found: ", utility_functions_path,
+    ". Set params$project_root to the project root and params$dir_src to the helper directory name, usually 'src'.",
+    call. = FALSE
+  )
+}
+
+# ---- Inputs (from 3_Norm/results) ----
+norm_results_path <- project_path(params$dir_outputs, params$norm_stage, params$norm_results_dir)
+path_normalised   <- path(norm_results_path, params$rds_normalised)
+path_geodiff      <- path(norm_results_path, params$rds_geodiff_norm)
+path_tmm          <- path(norm_results_path, params$rds_tmm_norm)
+
+# ---- Outputs (to 4_EDA/{results,tables,figures}) ----
+out_base    <- project_path(params$dir_outputs, params$out_stage)
+out_results <- path(out_base, params$out_results)
+out_tables  <- path(out_base, params$out_tables)
+out_figures <- path(out_base, params$out_figures)
+stage4_path_audit <- protocol_path_audit(
+  c(
+    "Q3 normalized input" = path_normalised,
+    "Optional GeoDiff-normalized input" = path_geodiff,
+    "TMM normalized input" = path_tmm,
+    "EDA figure directory" = out_figures
+  ),
+  portable_path_limit
+)
+protocol_assert_audit(stage4_path_audit, portable_path_limit)
+knitr::kable(stage4_path_audit, caption = "Stage 4 path-portability audit")
+
+dir_create(out_results, recurse = TRUE)
+dir_create(out_tables, recurse = TRUE)
+dir_create(out_figures, recurse = TRUE)
+
+# Helper for figure filenames (supports plot_prefix)
+# Figure-path helper that prepends optional run-specific prefix.
+FIG <- function(fname) {
+  protocol_output_path(
+    out_figures,
+    paste0(params$plot_prefix, fname),
+    path_limit = portable_path_limit
+  )
+}
+
+message("ROOT: ", root)
+message("Shared source helpers: ", dir_src)
+message("IN normalised: ", path_normalised)
+message("IN GeoDiff: ", path_geodiff)
+message("IN TMM: ", path_tmm)
+message("OUT base: ", out_base)
+message("OUT figures: ", out_figures)
+
+
+```
+
+## Load normalised inputs
+
+Load all normalised objects produced by the previous stage (Q3/negative-probe object, optional GeoDiff-normalized `normmat` object, and TMM object).
+
+```{r load-normalised-inputs}
+#| output: false
+#| message: false
+#| warning: false
+# object loading can emit known package warnings that do not affect correctness.
+
+
+source(utility_functions_path)
+
+target_spatialData <- readRDS(path_normalised)
+TMM_norm_data <- readRDS(path_tmm)
+
+geodiff_eda_available <- file_exists(path_geodiff)
+target_spatialData_GeoDiff <- NULL
+geodiff_eda_skip_message <- glue::glue(
+  "GeoDiff EDA skipped: GeoDiff_normalised_spatial_data.RDS was not found at {path_geodiff}. ",
+  "Q3 and TMM EDA sections remain available."
+)
+
+eda_input_status <- tibble::tibble(
+  Input = c("Q3/negative-probe normalised object", "TMM normalised object", "GeoDiff-normalized normmat object"),
+  Required_for_stage = c("Yes", "Yes", "No"),
+  Path = c(path_normalised, path_tmm, path_geodiff),
+  File_found = c(file_exists(path_normalised), file_exists(path_tmm), geodiff_eda_available),
+  Action = c(
+    "Used for Q3 EDA sections.",
+    "Used for TMM EDA sections.",
+    ifelse(geodiff_eda_available, "Used for GeoDiff EDA sections.", "GeoDiff-only EDA sections will be skipped.")
+  )
+)
+
+knitr::kable(
+  eda_input_status,
+  caption = "EDA input file availability. GeoDiff outputs are optional: when absent, Q3/TMM EDA continues and GeoDiff-only sections are skipped."
+)
+
+if (geodiff_eda_available) {
+  target_spatialData_GeoDiff <- readRDS(path_geodiff)
+  message(glue::glue("GeoDiff EDA enabled: GeoDiff-normalized normmat object found at {path_geodiff}."))
+} else {
+  message(geodiff_eda_skip_message)
+}
+
+```
+
+## Configure shared metadata and plotting helpers
+
+Define reusable palettes, metadata-resolution helpers, PCA wrappers, and plotting utilities shared across all methods.
+
+```{r define-shared-helpers}
+#| output: false
+#| message: false
+#| warning: false
+# helper definitions are warning-free in validated runs; hide incidental package chatter.
+
+# Color palettes use the shared Okabe-Ito-style helper for colorblind-safe categorical PCA plots.
+palette_seed_levels <- paste0("level_", seq_len(8))
+region_colours <- unname(protocol_discrete_palette(palette_seed_levels))
+segment_colours <- unname(protocol_discrete_palette(palette_seed_levels))
+patient_colours <- unname(protocol_discrete_palette(palette_seed_levels))
+slide_colours <- unname(protocol_discrete_palette(palette_seed_levels))
+
+protocol_font_family <- "Segoe UI"
+theme_set(theme_get() + theme(text = element_text(family = protocol_font_family)))
+
+suppress_known_pca_render_warnings <- function(expr) {
+  withCallingHandlers(
+    expr,
+    warning = function(w) {
+      msg <- conditionMessage(w)
+      known_attr_warning <- grepl("xfun::attr", msg, fixed = TRUE) &&
+        grepl("deprecated", msg, fixed = TRUE)
+      known_metadata_warning <- grepl("not numeric", msg, fixed = TRUE) &&
+        grepl("source data", msg, fixed = TRUE)
+      known_size_warning <- grepl("`size` aesthetic", msg, fixed = TRUE) &&
+        grepl("deprecated", msg, fixed = TRUE)
+      known_warning <- known_attr_warning || known_metadata_warning || known_size_warning
+
+      if (isTRUE(known_warning)) {
+        invokeRestart("muffleWarning")
+      }
+    }
+  )
+}
+
+
+# Metadata helpers (reused across TMM/Q3/GeoDiff)
+clean_colname <- function(x) {
+  x <- gsub("[[:space:]]+", "_", x)
+  x <- gsub("[^[:alnum:]_]", "", x)
+  tolower(x)
+}
+
+# Resolve requested metadata column names against pData headers.
+# This is tolerant to whitespace/newline and punctuation differences.
+resolve_covariates <- function(pheno, requested_columns) {
+  pnames <- colnames(pheno)
+  pclean <- clean_colname(pnames)
+
+  # Resolve each requested label against exact and cleaned header forms.
+  resolved <- vapply(requested_columns, function(col) {
+    # Exact-name match takes precedence to preserve user intent.
+    if (col %in% pnames) return(col)
+    col_clean <- clean_colname(col)
+    # Fallback: match after whitespace/punctuation normalization.
+    if (col_clean %in% pclean) return(pnames[match(col_clean, pclean)])
+    NA_character_
+  }, character(1))
+
+  names(resolved) <- requested_columns
+  resolved
+}
+
+# Choose the first available column from a list of candidate names.
+pick_first_available <- function(pheno, candidates, fallback = "Unknown") {
+  candidates <- unique(candidates)
+  hit <- candidates[candidates %in% colnames(pheno)]
+  # Deterministically choose first available candidate by priority order.
+  if (length(hit) > 0) return(hit[[1]])
+  fallback
+}
+
+default_covariates_extra <- c("area", "nuclei", "sample_id_meta", "GeneDetectionRate", "lib.size", "norm.factors")
+requested_covariates <- unique(c(params$metadata_columns, default_covariates_extra))
+resolved_covariates <- resolve_covariates(pData(target_spatialData), requested_covariates)
+available_covariates <- unique(stats::na.omit(unname(resolved_covariates)))
+# Explicitly report default covariates that are present/missing.
+# Present ones are included automatically in eigencor/PCA metadata checks.
+default_covariates_resolved <- resolved_covariates[default_covariates_extra]
+default_covariates_present <- unname(stats::na.omit(default_covariates_resolved))
+default_covariates_missing <- names(default_covariates_resolved)[is.na(default_covariates_resolved)]
+
+
+message("Requested metadata columns: ", paste(params$metadata_columns, collapse = ", "))
+resolved_covariate_table <- tibble::tibble(
+  requested_column = names(resolved_covariates),
+  resolved_column = unname(resolved_covariates),
+  status = dplyr::if_else(is.na(.data$resolved_column), "not found", "used")
+)
+
+knitr::kable(
+  resolved_covariate_table,
+  caption = "Metadata covariates resolved for PCA/eigencorrelation diagnostics."
+)
+
+message("Default covariates present and used (if non-constant): ",
+        paste(default_covariates_present, collapse = ", "))
+# Print only missing defaults so logs stay compact and useful.
+if (length(default_covariates_missing) > 0) {
+  message("Default covariates not found (skipped): ", paste(default_covariates_missing, collapse = ", "))
+}
+
+
+# Common role columns used in PCA and pairplots.
+# Each role resolves to the first matching named candidate, then falls back to
+# "Unknown". The user-supplied col_* params (see YAML) are tried FIRST, then the
+# built-in canonical names. We still deliberately do NOT append
+# `available_covariates` to the candidate lists: doing so made an unmatched role
+# silently resolve to an unrelated metadata column (e.g. the "primary" study
+# grouping becoming `slide_name` or `area`), mislabeling PCA panels. Prepending
+# only the explicit role params keeps resolution precise and dataset-adaptable.
+resolve_role_columns <- function(pheno) {
+  list(
+    primary = pick_first_available(
+      pheno,
+      c(params$col_disease_status, "disease_status", "condition"),
+      fallback = "Unknown"
+    ),
+    segment = pick_first_available(
+      pheno,
+      c(params$col_segment, params$col_cell_type, "segment", "cell_type", "annotation"),
+      fallback = "Unknown"
+    ),
+    patient = pick_first_available(
+      pheno,
+      c(params$col_patient, "patient_id", "sample_id_meta"),
+      fallback = "Unknown"
+    ),
+    plate = pick_first_available(
+      pheno,
+      c(params$col_slide, "plate_id", "slide_name", "slide"),
+      fallback = "Unknown"
+    ),
+    location = pick_first_available(
+      pheno,
+      c("location"),
+      fallback = "Unknown"
+    ),
+    slide = pick_first_available(
+      pheno,
+      c(params$col_slide, "slide_name", "slide"),
+      fallback = "Unknown"
+    )
+  )
+}
+
+make_primary_palette <- function(group_levels) {
+  # Generic palette builder for any grouping variable.
+  # This avoids hard-coded disease labels and scales to any number of levels.
+  protocol_discrete_palette(group_levels, fallback_level = "Unknown")
+}
+
+present_metavars <- function(pheno, vars, drop_constant = TRUE) {
+  vars <- intersect(vars, colnames(pheno))
+  # Keep only metadata columns that are present and informative for PCA corrplots.
+  vars <- vars[sapply(vars, function(v) {
+    x <- pheno[[v]]
+    x <- x[!is.na(x)]
+    # Drop columns with no non-missing values.
+    if (length(x) == 0) return(FALSE)
+    # Optionally allow invariant metadata columns for datasets with limited annotation.
+    if (!drop_constant) return(TRUE)
+    length(unique(x)) > 1
+  })]
+  vars
+}
+
+build_pca_metavars <- function(pheno) {
+  roles <- resolve_role_columns(pheno)
+  primary_covars <- unique(c(unname(unlist(roles)), available_covariates))
+  present_metavars(pheno, primary_covars, drop_constant = TRUE)
+}
+
+summarise_method_input <- function(method_label, normalisedData, pheno) {
+  message("--- ", method_label, " input summary ---")
+  message("Expression matrix: ", nrow(normalisedData), " genes x ", ncol(normalisedData), " samples")
+  message("Metadata rows: ", nrow(pheno), " | Metadata columns: ", ncol(pheno))
+}
+
+pca_available_components <- function(pca_res, method_label) {
+  if (is.null(pca_res$rotated) || is.null(dim(pca_res$rotated))) {
+    stop(
+      "Cannot validate PCA component settings for ", method_label,
+      ": PCA scores were not found in `pca_res$rotated`.",
+      call. = FALSE
+    )
+  }
+
+  ncol(pca_res$rotated)
+}
+
+format_pca_setting <- function(value) {
+  paste0("[", paste(unlist(value, use.names = FALSE), collapse = ", "), "]")
+}
+
+validate_pca_pair <- function(value, param_name, method_label, pca_res) {
+  available_pcs <- pca_available_components(pca_res, method_label)
+  raw_value <- unlist(value, use.names = FALSE)
+  pcs <- suppressWarnings(as.integer(raw_value))
+  raw_numeric <- suppressWarnings(as.numeric(raw_value))
+
+  valid_pair <- length(raw_value) == 2 &&
+    !any(is.na(pcs)) &&
+    all(as.character(pcs) == as.character(raw_value) | raw_numeric == pcs) &&
+    length(unique(pcs)) == 2 &&
+    all(pcs >= 1) &&
+    all(pcs <= available_pcs)
+
+  if (!isTRUE(valid_pair)) {
+    stop(
+      "Invalid PCA setting ", param_name, " = ", format_pca_setting(value),
+      " for ", method_label, " PCA: only ", available_pcs,
+      " PCs are available. Choose two distinct integer PCs between 1 and ",
+      available_pcs, ".",
+      call. = FALSE
+    )
+  }
+
+  pcs
+}
+
+validate_pca_pairs_components <- function(value, method_label, pca_res) {
+  available_pcs <- pca_available_components(pca_res, method_label)
+  raw_value <- unlist(value, use.names = FALSE)
+  n_components <- suppressWarnings(as.integer(raw_value))
+  raw_numeric <- suppressWarnings(as.numeric(raw_value))
+
+  valid_count <- length(raw_value) == 1 &&
+    !is.na(n_components) &&
+    (as.character(n_components) == as.character(raw_value) | raw_numeric == n_components) &&
+    n_components >= 1 &&
+    n_components <= available_pcs
+
+  if (!isTRUE(valid_count)) {
+    stop(
+      "Invalid PCA setting pca_pairs_components = ", paste(raw_value, collapse = ", "),
+      " for ", method_label, " pairsplot: only ", available_pcs,
+      " PCs are available. Choose one positive integer between 1 and ",
+      available_pcs, ".",
+      call. = FALSE
+    )
+  }
+
+  seq_len(n_components)
+}
+
+validate_positive_number_param <- function(value, param_name) {
+  raw_value <- unlist(value, use.names = FALSE)
+  numeric_value <- suppressWarnings(as.numeric(raw_value))
+
+  valid_value <- length(raw_value) == 1 &&
+    !is.na(numeric_value) &&
+    is.finite(numeric_value) &&
+    numeric_value > 0
+
+  if (!isTRUE(valid_value)) {
+    stop(
+      "Invalid PCA setting ", param_name, " = ", format_pca_setting(value),
+      ". Choose one positive numeric value.",
+      call. = FALSE
+    )
+  }
+
+  numeric_value
+}
+
+pca_pairs_point_size <- validate_positive_number_param(
+  params$pca_pairs_point_size,
+  "pca_pairs_point_size"
+)
+pca_pairs_axis_label_size <- validate_positive_number_param(
+  params$pca_pairs_axis_label_size,
+  "pca_pairs_axis_label_size"
+)
+pca_pairs_component_label_size <- validate_positive_number_param(
+  params$pca_pairs_component_label_size,
+  "pca_pairs_component_label_size"
+)
+
+pca_pair_label <- function(pc_pair) {
+  paste0("PC", pc_pair[[1]], " vs PC", pc_pair[[2]])
+}
+
+pca_panel_title <- function(method_label, pc_pair) {
+  paste0(method_label, " PCA: ", pca_pair_label(pc_pair))
+}
+
+pca_pairsplot_title <- function(method_label, component_count, colour_label) {
+  paste0(
+    method_label,
+    " PCA pairs plot: ",
+    colour_label,
+    " (PCs 1-",
+    component_count,
+    ")"
+  )
+}
+
+format_metadata_label <- function(column_name) {
+  label <- gsub("[._]+", " ", column_name)
+  tools::toTitleCase(label)
+}
+
+build_pca_colour_legend <- function(colour_column, colour_key) {
+  legend_levels <- names(colour_key)
+  if (is.null(legend_levels) || any(!nzchar(legend_levels))) {
+    stop("PCA pairs-plot palettes must be named so the color key can be labelled.", call. = FALSE)
+  }
+
+  legend_data <- data.frame(
+    group = factor(legend_levels, levels = legend_levels),
+    x = 1,
+    y = seq_along(legend_levels)
+  )
+
+  legend_plot <- ggplot(
+    legend_data,
+    aes(x = .data$x, y = .data$y, colour = .data$group)
+  ) +
+    geom_point(size = 3) +
+    scale_colour_manual(
+      values = colour_key,
+      breaks = legend_levels,
+      drop = FALSE,
+      name = format_metadata_label(colour_column)
+    ) +
+    guides(colour = guide_legend(override.aes = list(size = 3))) +
+    theme_void(base_family = protocol_font_family) +
+    theme(
+      legend.position = "right",
+      legend.title = element_text(size = 9, face = "bold"),
+      legend.text = element_text(size = 8)
+    )
+
+  cowplot::get_legend(legend_plot)
+}
+
+build_pca_pairs_plot <- function(pca_res, pair_components, colour_column, colour_key, method_label) {
+  colour_label <- format_metadata_label(colour_column)
+
+  # PCAtools returns a cowplot object, so its native title argument must be used.
+  pairs_core <- suppress_known_pca_render_warnings(
+    pairsplot(
+      pca_res,
+      components      = getComponents(pca_res, pair_components),
+      colby           = colour_column,
+      colkey          = colour_key,
+      pointSize       = pca_pairs_point_size,
+      axisLabSize     = pca_pairs_axis_label_size,
+      trianglelabSize = pca_pairs_component_label_size,
+      legendPosition  = "none",
+      title           = pca_pairsplot_title(method_label, length(pair_components), colour_label),
+      titleLabSize    = 18
+    )
+  )
+
+  # Add one shared key rather than repeating the same legend in every PCA panel.
+  shared_legend <- build_pca_colour_legend(colour_column, colour_key)
+  cowplot::plot_grid(
+    pairs_core,
+    shared_legend,
+    nrow = 1,
+    rel_widths = c(1, 0.24)
+  )
+}
+
+
+
+# Keep titles readable and consistent with the rest of the pipeline output.
+title_theme <- theme(
+  text = element_text(family = protocol_font_family),
+  plot.title = element_text(size = 10, face = "bold", family = protocol_font_family),
+  legend.title = element_text(size = 9, family = protocol_font_family),
+  legend.text = element_text(size = 8, family = protocol_font_family)
+)
+
+# Print which resolved metadata columns are actually used in each method block.
+cat_role_summary <- function(method_label, pheno) {
+  roles <- resolve_role_columns(pheno)
+  message(method_label, " roles -> primary: ", roles$primary,
+          ", segment: ", roles$segment,
+          ", patient: ", roles$patient,
+          ", plate: ", roles$plate)
+}
+
+# Eigencor output can be ggplot, trellis, or a grob depending on package versions.
+plot_eigencor <- function(corplot, fallback_title = NULL) {
+  # Older utility copies do not accept a native title; add one around the returned plot.
+  if (!is.null(fallback_title)) {
+    title_grob <- ggdraw() +
+      draw_label(
+        fallback_title,
+        fontface = "bold",
+        fontfamily = protocol_font_family,
+        size = 14
+      )
+    return(plot_grid(title_grob, corplot, ncol = 1, rel_heights = c(0.12, 1)))
+  }
+
+  if (inherits(corplot, "ggplot")) {
+    return(corplot)
+  }
+
+  if (inherits(corplot, "trellis")) {
+    print(corplot)
+    return(invisible(NULL))
+  }
+
+  grid::grid.newpage()
+  grid::grid.draw(corplot)
+  invisible(NULL)
+}
+
+run_pca_with_eigencor <- function(normalisedData, pheno, label = "PCA") {
+  metavars <- build_pca_metavars(pheno)
+  # Hard-stop when no variable remains after presence/constant filtering.
+  if (length(metavars) == 0) stop("No usable metadata columns available for eigencorplot.")
+
+  # `PCAtools::pca` performs centered/scaled PCA and stores loadings/scores in one object
+  # used by eigencorplot, pairsplot and plotPCA helpers below.
+  pca_res <- pca(na.omit(normalisedData), metadata = pheno, scale = TRUE, center = TRUE)
+  pca_df_out <- as.data.frame(pca_res$rotated)
+
+  diag <- data.frame(
+    var      = metavars,
+    class    = sapply(metavars, \(v) paste(class(pheno[[v]]), collapse = "/")),
+    n_total  = nrow(pheno),
+    n_na     = sapply(metavars, \(v) sum(is.na(pheno[[v]]))),
+    n_unique = sapply(metavars, \(v) length(unique(pheno[[v]][!is.na(pheno[[v]])])))
+  )
+
+  message("[", label, "] eigencor metavars: ", paste(metavars, collapse = ", "))
+  suppress_known_pca_render_warnings(
+    knitr::kable(
+      diag[order(diag$n_unique, diag$n_na, decreasing = FALSE), ],
+      caption = glue::glue("{label} metadata variable audit for PCA eigencorrelation.")
+    )
+  )
+
+  eigencor_title <- paste0(label, " PCA eigencorrelation: PCs and metadata covariates")
+  eigencor_args <- list(x = pca_res, metavars = metavars)
+  supports_native_title <- "main" %in% names(formals(eigencorplotPCA))
+  if (supports_native_title) {
+    eigencor_args$main <- eigencor_title
+  }
+
+  corplot <- suppress_known_pca_render_warnings(
+    do.call(eigencorplotPCA, eigencor_args)
+  )
+
+  list(
+    pca_res = pca_res,
+    pca_df_out = pca_df_out,
+    metavars = metavars,
+    # `eigencorplotPCA` correlates each PC with metadata variables to flag technical drivers.
+    corplot = corplot,
+    corplot_fallback_title = if (supports_native_title) NULL else eigencor_title
+  )
+}
+
+
+run_pca_panel_workflow <- function(pca_res, pheno, method_label, main_file) {
+  main_pair <- validate_pca_pair(params$pca_main_pair, "pca_main_pair", method_label, pca_res)
+  secondary_pair <- validate_pca_pair(params$pca_secondary_pair, "pca_secondary_pair", method_label, pca_res)
+  batch_pair <- validate_pca_pair(params$pca_batch_pair, "pca_batch_pair", method_label, pca_res)
+
+  # Safe accessor that guarantees a factor column even when metadata is missing.
+  get_col <- function(var_name, fallback = "Unknown") {
+    # Missing role column -> inject fallback level so plotting still succeeds.
+    if (!var_name %in% colnames(pheno)) return(factor(rep(fallback, nrow(pheno))))
+    x <- as.character(pheno[[var_name]])
+    x[is.na(x) | x == ""] <- fallback
+    factor(x)
+  }
+
+  roles <- resolve_role_columns(pheno)
+  primary_var_name <- roles$primary
+  segment_var_name <- roles$segment
+  patient_var_name <- roles$patient
+  plate_var_name <- roles$plate
+
+  primary_var <- get_col(primary_var_name)
+  segment_var <- get_col(segment_var_name)
+  patient_var <- get_col(patient_var_name)
+  plate_var   <- get_col(plate_var_name)
+
+  # PCAtools::plotPCA internally uses a limited manual shape scale.
+  # If there are many segment levels, drop shape mapping (color mapping is retained).
+  shape_var <- segment_var
+  max_supported_shapes <- 4
+  # Too many shape levels can break manual scales; disable shape mapping gracefully.
+  if (nlevels(shape_var) > max_supported_shapes) {
+    message("[", method_label, "] segment has ", nlevels(shape_var),
+            " levels; disabling shape mapping to avoid manual-scale errors.")
+    shape_var <- NULL
+  }
+
+  primary_palette <- protocol_discrete_palette(levels(primary_var), fallback_level = "Unknown")
+  segment_palette <- protocol_discrete_palette(levels(segment_var), fallback_level = "Unknown")
+  patient_palette <- protocol_discrete_palette(levels(patient_var), fallback_level = "Unknown")
+  plate_palette   <- protocol_discrete_palette(levels(plate_var), fallback_level = "Unknown")
+
+  # `plotPCA` wrapper draws score scatter for selected PCs with provided color/shape mapping.
+  p1 <- suppress_known_pca_render_warnings(
+    plotPCA(
+      pca_res,
+      PCs = main_pair,
+      colours = primary_palette,
+      colour.data = primary_var,
+      shape.data = shape_var,
+      colour.lab = primary_var_name,
+      sample.lab = FALSE
+    )
+  ) + ggtitle(pca_panel_title(method_label, main_pair)) + title_theme
+
+  p2 <- suppress_known_pca_render_warnings(
+    plotPCA(
+      pca_res,
+      PCs = main_pair,
+      colours = patient_palette,
+      colour.data = patient_var,
+      shape.data = shape_var,
+      colour.lab = patient_var_name,
+      sample.lab = FALSE
+    )
+  ) + ggtitle(pca_panel_title(method_label, main_pair)) + title_theme
+
+  p3 <- suppress_known_pca_render_warnings(
+    plotPCA(
+      pca_res,
+      PCs = main_pair,
+      colours = segment_palette,
+      colour.data = segment_var,
+      colour.lab = segment_var_name,
+      sample.lab = FALSE
+    )
+  ) + ggtitle(pca_panel_title(method_label, main_pair)) + title_theme
+
+  p4 <- suppress_known_pca_render_warnings(
+    plotPCA(
+      pca_res,
+      PCs = secondary_pair,
+      colours = primary_palette,
+      colour.data = primary_var,
+      shape.data = shape_var,
+      colour.lab = primary_var_name,
+      sample.lab = FALSE
+    )
+  ) + stat_ellipse() +
+    ggtitle(pca_panel_title(method_label, secondary_pair)) + title_theme
+
+  p5 <- suppress_known_pca_render_warnings(
+    plotPCA(
+      pca_res,
+      PCs = batch_pair,
+      colours = plate_palette,
+      colour.data = plate_var,
+      shape.data = shape_var,
+      colour.lab = plate_var_name,
+      sample.lab = FALSE
+    )
+  ) + ggtitle(pca_panel_title(method_label, batch_pair)) + title_theme
+
+  p6 <- suppress_known_pca_render_warnings(
+    screeplot(
+      pca_res,
+      # Clamp to the number of available PCs so small datasets (few samples) do
+      # not request more components than exist.
+      components = seq_len(min(as.integer(params$pca_scree_components), ncol(pca_res$rotated))),
+      axisLabSize = 18,
+      title = ""
+    )
+  ) + theme_cowplot(font_family = protocol_font_family) + ggtitle(paste0(method_label, " PCA: scree plot")) + title_theme
+
+  panel_grid <- suppress_known_pca_render_warnings(
+    plot_grid(p1, p2, p3, p4, p5, p6, ncol = as.integer(params$pca_main_ncol), labels = "AUTO")
+  )
+
+  figure_title <- ggdraw() +
+    draw_label(
+      paste0(method_label, " PCA diagnostic summary"),
+      fontface = "bold",
+      fontfamily = protocol_font_family,
+      size = 14
+    )
+
+  main_grid_save <- plot_grid(
+    figure_title,
+    panel_grid,
+    ncol = 1,
+    rel_heights = c(0.05, 1)
+  )
+
+  # Persist combined PCA panel only when save toggle is enabled.
+  if (isTRUE(params$save_plots)) {
+    save_plot(filename = FIG(main_file), plot = main_grid_save, base_height = 10, base_width = 11, bg = "white")
+  }
+
+  list(main_plot = main_grid_save)
+}
+
+
+
+# ---- Variance partition helpers ----------------------------------------------
+# variancePartition decomposes each gene's expression variance across the study
+# variables. These helpers resolve and screen the requested variables, build the
+# mixed-model formula, and run the fit plus violin plot for one normalization
+# branch. They reuse resolve_covariates(), available_covariates, and FIG() from
+# above so the same metadata configuration drives PCA and variance partition.
+
+# Resolve the two typed YAML lists against the metadata headers. When BOTH are
+# empty, fall back to the EDA covariate set and auto-classify numeric columns as
+# continuous and everything else as categorical.
+resolve_varpart_covariates <- function(pheno) {
+  cat_req <- as.character(unlist(params$varpart_categorical, use.names = FALSE))
+  con_req <- as.character(unlist(params$varpart_continuous, use.names = FALSE))
+  cat_req <- cat_req[nzchar(trimws(cat_req))]
+  con_req <- con_req[nzchar(trimws(con_req))]
+
+  if (length(cat_req) == 0 && length(con_req) == 0) {
+    auto_cols <- available_covariates
+    is_num <- vapply(auto_cols, function(v) is.numeric(pheno[[v]]), logical(1))
+    return(list(categorical = unname(auto_cols[!is_num]),
+                continuous  = unname(auto_cols[is_num])))
+  }
+
+  list(
+    categorical = unname(stats::na.omit(resolve_covariates(pheno, cat_req))),
+    continuous  = unname(stats::na.omit(resolve_covariates(pheno, con_req)))
+  )
+}
+
+# Screen resolved variables for variancePartition: keep only present columns, drop
+# constant columns, drop categorical columns that are unique per segment (a random
+# effect with one observation per level is degenerate), coerce types, and report
+# every drop. Returns the cleaned metadata frame plus the kept term lists.
+screen_varpart_covariates <- function(pheno, categorical, continuous) {
+  pheno <- as.data.frame(pheno)
+  n_row <- nrow(pheno)
+  keep_cat <- character(0)
+  keep_con <- character(0)
+
+  for (v in unique(categorical)) {
+    if (!v %in% colnames(pheno)) next
+    x <- pheno[[v]]
+    n_lev <- dplyr::n_distinct(x[!is.na(x)])
+    if (n_lev < 2) {
+      message("[variance partition] dropping categorical '", v, "': fewer than 2 observed levels.")
+      next
+    }
+    if (n_lev == n_row) {
+      message("[variance partition] dropping categorical '", v, "': one level per segment (degenerate random effect).")
+      next
+    }
+    pheno[[v]] <- factor(as.character(x))
+    keep_cat <- c(keep_cat, v)
+  }
+
+  for (v in unique(continuous)) {
+    if (!v %in% colnames(pheno)) next
+    x <- suppressWarnings(as.numeric(pheno[[v]]))
+    if (all(is.na(x)) || dplyr::n_distinct(x[!is.na(x)]) < 2) {
+      message("[variance partition] dropping continuous '", v, "': not numeric or constant.")
+      next
+    }
+    pheno[[v]] <- x
+    keep_con <- c(keep_con, v)
+  }
+
+  list(data = pheno, categorical = keep_cat, continuous = keep_con)
+}
+
+# Build the variancePartition formula: continuous variables as fixed numeric
+# terms, categorical variables as random effects (1|x). Non-syntactic names are
+# backtick-quoted. Stops with a clear message when no usable variable remains.
+build_varpart_formula <- function(categorical, continuous) {
+  quote_term <- function(x) if (identical(make.names(x), x)) x else paste0("`", x, "`")
+  con_terms <- vapply(continuous, quote_term, character(1))
+  cat_terms <- vapply(categorical, function(x) paste0("(1|", quote_term(x), ")"), character(1))
+  rhs <- c(con_terms, cat_terms)
+  if (length(rhs) == 0) {
+    stop("No usable variables remain for variance partition after screening.", call. = FALSE)
+  }
+  stats::as.formula(paste("~", paste(rhs, collapse = " + ")))
+}
+
+# Reproducible parallel backend, mirroring the stage 5 dream setup.
+varpart_bpparam <- function() {
+  workers <- max(1, parallel::detectCores() - 1)
+  if (.Platform$OS.type == "windows") {
+    BiocParallel::SnowParam(workers = workers, RNGseed = params$varpart_seed)
+  } else {
+    BiocParallel::MulticoreParam(workers = workers, RNGseed = params$varpart_seed)
+  }
+}
+
+# Run variancePartition for one normalization branch and return the violin plot.
+# Optionally caps to the top-N most variable genes for speed. Fit failures (for
+# example collinear covariates) are caught and reported so one branch cannot abort
+# the whole notebook.
+run_varpart <- function(expr_mat, pheno, label = "variance partition") {
+  expr_mat <- as.matrix(expr_mat)
+  pheno <- as.data.frame(pheno)
+  # Drop genes with any missing values before model fitting.
+  expr_mat <- expr_mat[rowSums(is.na(expr_mat)) == 0, , drop = FALSE]
+
+  covar <- resolve_varpart_covariates(pheno)
+  screened <- screen_varpart_covariates(pheno, covar$categorical, covar$continuous)
+  form <- build_varpart_formula(screened$categorical, screened$continuous)
+  message("[", label, "] variance partition formula: ", deparse(form))
+
+  # Cap to the most variable genes when requested.
+  max_genes <- suppressWarnings(as.integer(params$varpart_max_genes))
+  if (!is.na(max_genes) && max_genes > 0 && nrow(expr_mat) > max_genes) {
+    gene_var <- apply(expr_mat, 1, stats::var)
+    keep <- order(gene_var, decreasing = TRUE)[seq_len(max_genes)]
+    expr_mat <- expr_mat[sort(keep), , drop = FALSE]
+    message("[", label, "] capped to top ", max_genes, " most variable genes.")
+  }
+
+  tryCatch({
+    bp <- varpart_bpparam()
+    vp <- variancePartition::fitExtractVarPartModel(expr_mat, form, screened$data, BPPARAM = bp)
+    vp <- variancePartition::sortCols(vp)
+    list(ok = TRUE, plot = variancePartition::plotVarPart(vp), varpart = vp)
+  }, error = function(e) {
+    list(ok = FALSE, message = conditionMessage(e))
+  })
+}
+
+
+
+```
+
+# Dimensionality reduction
+
+## PCA
+
+This section runs PCA for each normalization method using a consistent workflow:
+
+1. Fit PCA on the normalized matrix.
+2. Generate eigencorrelation heatmaps against available metadata covariates.
+3. Generate pairs plots for selected role columns.
+4. Render a multi-panel PCA summary figure.
+
+Use these outputs to check whether sample separation looks consistent across normalization methods and whether technical or metadata variables may be driving the structure.
+
+::: {.callout-tip}
+## Comparing normalization branches
+The three groups of figures below share linked tabs. Selecting TMM, Q3, or GeoDiff-normalized data in any group switches the other groups to the same normalization branch, so you can compare them directly without scrolling back to an earlier set of tabs.
+:::
+
+### PCA eigencorrelation heatmaps
+
+Review associations between principal components and available metadata covariates. Strong associations with technical variables should be investigated before continuing.
+
+::: {.panel-tabset group="eda-normalization"}
+#### TMM normalization
+
+```{r pca-eigencor-tmm}
+#| message: false
+#| warning: false
+#| label: fig-Eigencor-TMM
+#| fig-cap: TMM PCA eigencorrelation heatmap showing associations between principal components and available metadata covariates.
+#| fig-width: 10
+#| fig-height: 4.5
+# eigencor rendering can emit benign plotting warnings across PCAtools versions.
+
+
+# Read in data
+tmm_normalised_data <- cpm(TMM_norm_data, log=TRUE)
+tmm_pheno <- TMM_norm_data[["samples"]]
+
+
+summarise_method_input("TMM PCA", tmm_normalised_data, tmm_pheno)
+cat_role_summary("TMM PCA", tmm_pheno)
+tmm_pca_out <- run_pca_with_eigencor(tmm_normalised_data, tmm_pheno, label = "TMM")
+tmm_pca_res <- tmm_pca_out$pca_res
+tmm_pca_df_out <- tmm_pca_out$pca_df_out
+tmm_metavars <- tmm_pca_out$metavars
+tmm_corplot <- tmm_pca_out$corplot
+
+
+plot_eigencor(tmm_corplot, tmm_pca_out$corplot_fallback_title)
+
+# Save the eigencorrelation heatmap as a 300 dpi PNG. PCAtools::eigencorplot
+# returns a lattice/grid object (not a ggplot), so it is saved via a png()
+# device rather than ggsave(). Manuscript Figure 5A uses the GeoDiff branch.
+if (isTRUE(params$save_plots)) {
+  grDevices::png(FIG("TMM_eigencor.png"), width = 10, height = 4.5, units = "in", res = 300)
+  .eig <- plot_eigencor(tmm_corplot, tmm_pca_out$corplot_fallback_title)
+  if (inherits(.eig, "ggplot") || inherits(.eig, "gg")) print(.eig)
+  grDevices::dev.off()
+}
+
+
+```
+
+#### Q3 normalization
+
+```{r pca-eigencor-q3}
+#| message: false
+#| warning: false
+#| label: fig-Eigencor-Q3
+#| fig-cap: Q3 PCA eigencorrelation heatmap showing associations between principal components and available metadata covariates.
+#| fig-width: 10
+#| fig-height: 4.5
+# eigencor rendering can emit benign plotting warnings across PCAtools versions.
+
+
+# ---- Read in data ----
+q3_normalised_data <- log2(assayDataElement(target_spatialData, elt = "q_norm"))
+q3_pheno          <- pData(target_spatialData)
+
+summarise_method_input("Q3 PCA", q3_normalised_data, q3_pheno)
+cat_role_summary("Q3 PCA", q3_pheno)
+q3_pca_out <- run_pca_with_eigencor(q3_normalised_data, q3_pheno, label = "Q3")
+q3_pca_res <- q3_pca_out$pca_res
+q3_pca_df_out <- q3_pca_out$pca_df_out
+q3_metavars <- q3_pca_out$metavars
+q3_corplot <- q3_pca_out$corplot
+plot_eigencor(q3_corplot, q3_pca_out$corplot_fallback_title)
+
+# Save the Q3 eigencorrelation heatmap as a 300 dpi PNG (see note in the TMM tab).
+if (isTRUE(params$save_plots)) {
+  grDevices::png(FIG("Q3_eigencor.png"), width = 10, height = 4.5, units = "in", res = 300)
+  .eig <- plot_eigencor(q3_corplot, q3_pca_out$corplot_fallback_title)
+  if (inherits(.eig, "ggplot") || inherits(.eig, "gg")) print(.eig)
+  grDevices::dev.off()
+}
+
+```
+
+#### GeoDiff-normalized normmat
+
+Run the same PCA and eigencorrelation workflow on the optional GeoDiff-normalized normmat matrix.
+
+```{r pca-eigencor-geodiff}
+#| message: false
+#| warning: false
+#| label: fig-Eigencor-GeoDiff
+#| fig-cap: GeoDiff PCA eigencorrelation heatmap showing associations between principal components and available metadata covariates.
+#| fig-width: 10
+#| fig-height: 4.5
+# eigencor rendering can emit benign plotting warnings across PCAtools versions.
+
+# ---- Read in data ----
+geodiff_pca_res <- NULL
+geodiff_pheno <- NULL
+
+if (geodiff_eda_available && !is.null(target_spatialData_GeoDiff)) {
+  geodiff_normalised_data <- assayDataElement(target_spatialData_GeoDiff, elt = "normmat")
+  geodiff_normalised_data <- na.omit(geodiff_normalised_data)
+
+  geodiff_pheno <- pData(target_spatialData_GeoDiff)
+
+  summarise_method_input("GeoDiff PCA", geodiff_normalised_data, geodiff_pheno)
+  cat_role_summary("GeoDiff PCA", geodiff_pheno)
+  geodiff_pca_out <- run_pca_with_eigencor(geodiff_normalised_data, geodiff_pheno, label = "GeoDiff")
+  geodiff_pca_res <- geodiff_pca_out$pca_res
+  geodiff_corplot <- geodiff_pca_out$corplot
+  plot_eigencor(geodiff_corplot, geodiff_pca_out$corplot_fallback_title)
+
+  # Save the GeoDiff eigencorrelation heatmap as a 300 dpi PNG (manuscript Figure 5A).
+  if (isTRUE(params$save_plots)) {
+    grDevices::png(FIG("GeoDiff_eigencor.png"), width = 10, height = 4.5, units = "in", res = 300)
+    .eig <- plot_eigencor(geodiff_corplot, geodiff_pca_out$corplot_fallback_title)
+    if (inherits(.eig, "ggplot") || inherits(.eig, "gg")) print(.eig)
+    grDevices::dev.off()
+  }
+} else {
+  message(geodiff_eda_skip_message)
+}
+
+```
+
+:::
+
+### PCA pairs plots
+
+Use the pairs plots to compare multivariate sample separation and identify potential outliers. TMM, Q3, and GeoDiff each include both primary-group and segment views so the normalization branches can be compared consistently.
+
+::: {.panel-tabset group="eda-normalization"}
+#### TMM normalization
+
+```{r pca-pairs-tmm, message=FALSE, warning=FALSE, fig.height = 9, fig.width = 9, fig.align="center"}
+#| label: fig-PCAPairs-TMM
+#| fig-cap: "TMM PCA pairs plots. Pairwise principal-component scatter used to assess multivariate sample separation and identify potential outliers, shown for two colourings."
+#| fig-subcap:
+#|   - "Coloured by the resolved primary study grouping."
+#|   - "Coloured by segment."
+#| layout-ncol: 1
+
+
+
+## Pair plot for the primary grouping covariate
+pair_components <- validate_pca_pairs_components(params$pca_pairs_components, "TMM", tmm_pca_res)
+roles <- resolve_role_columns(tmm_pheno)
+primary_col <- roles$primary
+tmm_pheno[[primary_col]] <- factor(tmm_pheno[[primary_col]])
+primary_palette <- make_primary_palette(levels(tmm_pheno[[primary_col]]))
+
+# `pairsplot` shows pairwise PC relationships and helps detect separations/outliers.
+tmm_pairs_plot_primary <- build_pca_pairs_plot(
+  pca_res = tmm_pca_res,
+  pair_components = pair_components,
+  colour_column = primary_col,
+  colour_key = primary_palette,
+  method_label = "TMM"
+)
+
+
+
+if (isTRUE(params$save_plots)) {
+  save_plot(
+    filename    = FIG("TMM_pairsplot_primary_group.png"),
+    plot        = tmm_pairs_plot_primary,
+    base_height = 10,
+    base_width  = 11,
+    bg          = "white"
+  )
+}
+
+
+suppress_known_pca_render_warnings(print(tmm_pairs_plot_primary))
+
+roles <- resolve_role_columns(tmm_pheno)
+segment_col <- roles$segment
+tmm_pheno[[segment_col]] <- factor(tmm_pheno[[segment_col]])
+
+# Pair plot for segments
+segment_levels <- levels(tmm_pheno[[segment_col]])
+segment_palette <- protocol_discrete_palette(segment_levels, fallback_level = "Unknown")
+
+# Segment-focused pairs plot complements primary grouping view for cross-checking structure.
+tmm_pairs_plot_segment <- build_pca_pairs_plot(
+  pca_res = tmm_pca_res,
+  pair_components = pair_components,
+  colour_column = segment_col,
+  colour_key = segment_palette,
+  method_label = "TMM"
+)
+
+
+if (isTRUE(params$save_plots)) {
+  save_plot(
+    filename    = FIG("TMM_pairsplot_segment.png"),
+    plot        = tmm_pairs_plot_segment,
+    base_height = 10,
+    base_width  = 11,
+    bg          = "white"
+  )
+}
+
+
+suppress_known_pca_render_warnings(print(tmm_pairs_plot_segment))
+
+
+```
+
+#### Q3 normalization
+
+```{r pca-pairs-q3, message=FALSE, warning=FALSE, fig.height = 9, fig.width = 9, fig.align="center"}
+#| label: fig-PCAPairs-Q3
+#| fig-cap: "Q3 PCA pairs plots. Pairwise principal-component scatter for the Q3-normalised data; compare these views with the TMM and GeoDiff results."
+#| fig-subcap:
+#|   - "Coloured by the resolved primary study grouping."
+#|   - "Coloured by segment."
+#| layout-ncol: 1
+
+# Build pairs plot from the Q3 PCA outputs defined in the previous code section:
+# normalisedData <- log2(assayDataElement(target_spatialData, elt = "q_norm"))
+# q3_pheno          <- pData(target_spatialData)
+# q3_pca_res        <- pca(na.omit(normalisedData), metadata = q3_pheno, scale = TRUE, center = TRUE)
+
+# Primary grouping column for this dataset
+pair_components <- validate_pca_pairs_components(params$pca_pairs_components, "Q3", q3_pca_res)
+roles <- resolve_role_columns(q3_pheno)
+primary_col <- roles$primary
+q3_pheno[[primary_col]] <- factor(q3_pheno[[primary_col]])
+
+# Build a palette for the primary grouping levels
+primary_palette <- make_primary_palette(levels(q3_pheno[[primary_col]]))
+
+# Minimal pairs plot for Q3-normalised matrix using primary grouping only.
+q3_pairs_plot_primary <- build_pca_pairs_plot(
+  pca_res = q3_pca_res,
+  pair_components = pair_components,
+  colour_column = primary_col,
+  colour_key = primary_palette,
+  method_label = "Q3"
+)
+
+
+
+if (isTRUE(params$save_plots)) {
+  save_plot(
+    filename    = FIG("Q3_pairsplot_primary_group.png"),
+    plot        = q3_pairs_plot_primary,
+    base_height = 10,
+    base_width  = 11,
+    bg          = "white"
+  )
+}
+
+
+suppress_known_pca_render_warnings(print(q3_pairs_plot_primary))
+
+roles <- resolve_role_columns(q3_pheno)
+segment_col <- roles$segment
+q3_pheno[[segment_col]] <- factor(q3_pheno[[segment_col]])
+
+# Pair plot for segments (kept consistent with the TMM and GeoDiff segment views)
+segment_levels <- levels(q3_pheno[[segment_col]])
+segment_palette <- protocol_discrete_palette(segment_levels, fallback_level = "Unknown")
+
+# Segment-focused pairs plot complements primary grouping view for cross-checking structure.
+q3_pairs_plot_segment <- build_pca_pairs_plot(
+  pca_res = q3_pca_res,
+  pair_components = pair_components,
+  colour_column = segment_col,
+  colour_key = segment_palette,
+  method_label = "Q3"
+)
+
+
+if (isTRUE(params$save_plots)) {
+  save_plot(
+    filename    = FIG("Q3_pairsplot_segment.png"),
+    plot        = q3_pairs_plot_segment,
+    base_height = 10,
+    base_width  = 11,
+    bg          = "white"
+  )
+}
+
+
+suppress_known_pca_render_warnings(print(q3_pairs_plot_segment))
+
+```
+
+#### GeoDiff-normalized normmat
+
+```{r pca-pairs-geodiff, message=FALSE, warning=FALSE, fig.height = 9, fig.width = 9, fig.align="center"}
+#| label: fig-PCAPairs-GeoDiff
+#| fig-cap: "GeoDiff PCA pairs plots. Pairwise principal-component scatter for the GeoDiff-normalised data; compare these views with the TMM and Q3 results."
+#| fig-subcap:
+#|   - "Coloured by the resolved primary study grouping."
+#|   - "Coloured by segment."
+#| layout-ncol: 1
+
+if (!is.null(geodiff_pca_res) && !is.null(geodiff_pheno)) {
+  geodiff_pairs_pheno <- geodiff_pheno
+  pair_components <- validate_pca_pairs_components(params$pca_pairs_components, "GeoDiff", geodiff_pca_res)
+
+  # Primary grouping column for this dataset
+  roles <- resolve_role_columns(geodiff_pairs_pheno)
+  primary_col <- roles$primary
+  geodiff_pairs_pheno[[primary_col]] <- factor(geodiff_pairs_pheno[[primary_col]])
+
+  primary_palette <- make_primary_palette(levels(geodiff_pairs_pheno[[primary_col]]))
+
+  # GeoDiff primary-group pairs plot to compare clustering versus other normalisations.
+  geodiff_pairs_plot_primary <- build_pca_pairs_plot(
+    pca_res = geodiff_pca_res,
+    pair_components = pair_components,
+    colour_column = primary_col,
+    colour_key = primary_palette,
+    method_label = "GeoDiff"
+  )
+
+
+
+  if (isTRUE(params$save_plots)) {
+    save_plot(
+      filename    = FIG("GeoDiff_pairsplot_primary_group.png"),
+      plot        = geodiff_pairs_plot_primary,
+      base_height = 10,
+      base_width  = 11,
+      bg          = "white"
+    )
+  }
+
+  suppress_known_pca_render_warnings(print(geodiff_pairs_plot_primary))
+
+
+
+  # now do segment
+  roles <- resolve_role_columns(geodiff_pairs_pheno)
+  segment_col <- roles$segment
+  geodiff_pairs_pheno[[segment_col]] <- factor(geodiff_pairs_pheno[[segment_col]])
+
+  seg_levels  <- levels(geodiff_pairs_pheno[[segment_col]])
+  seg_palette <- protocol_discrete_palette(seg_levels, fallback_level = "Unknown")
+
+  # GeoDiff segment-based pairs plot for method-consistent segment separation checks.
+  geodiff_pairs_plot_segment <- build_pca_pairs_plot(
+    pca_res = geodiff_pca_res,
+    pair_components = pair_components,
+    colour_column = segment_col,
+    colour_key = seg_palette,
+    method_label = "GeoDiff"
+  )
+
+
+
+  if (isTRUE(params$save_plots)) {
+    save_plot(
+      filename    = FIG("GeoDiff_pairsplot_segment.png"),
+      plot        = geodiff_pairs_plot_segment,
+      base_height = 10,
+      base_width  = 11,
+      bg          = "white"
+    )
+  }
+
+
+  suppress_known_pca_render_warnings(print(geodiff_pairs_plot_segment))
+} else {
+  message(geodiff_eda_skip_message)
+}
+
+
+```
+
+:::
+
+### PCA diagnostic summaries
+
+Compare the configured score plots and explained-variance summaries. Confirm that the selected normalization branch produces biologically plausible structure without dominant unexplained technical effects.
+
+::: {.panel-tabset group="eda-normalization"}
+#### TMM normalization
+
+```{r pca-panels-tmm}
+#| message: false
+#| warning: false
+#| label: fig-PCAQC-TMM
+#| fig-cap: TMM PCA diagnostic summary showing score plots for key metadata variables and the explained-variance scree plot.
+#| fig-width: 10
+#| fig-height: 10
+# PCAtools plotting may emit benign ggplot2 deprecation warnings.
+
+tmm_pca_panels <- run_pca_panel_workflow(
+  pca_res = tmm_pca_res,
+  pheno = tmm_pheno,
+  method_label = "TMM",
+  main_file = "TMM_PCA.png"
+)
+
+suppress_known_pca_render_warnings(print(tmm_pca_panels$main_plot))
+
+```
+
+#### Q3 normalization
+
+```{r pca-panels-q3}
+#| message: false
+#| warning: false
+#| label: fig-PCAQC-Q3
+#| fig-cap: Q3 PCA diagnostic summary showing score plots for key metadata variables and the explained-variance scree plot.
+#| fig-width: 10
+#| fig-height: 10
+# PCAtools plotting may emit benign ggplot2 deprecation warnings.
+
+q3_pca_panels <- run_pca_panel_workflow(
+  pca_res = q3_pca_res,
+  pheno = q3_pheno,
+  method_label = "Q3",
+  main_file = "Q3_PCA.png"
+)
+
+suppress_known_pca_render_warnings(print(q3_pca_panels$main_plot))
+
+```
+
+#### GeoDiff-normalized normmat
+
+```{r pca-panels-geodiff}
+#| message: false
+#| warning: false
+#| label: fig-PCAQC-GeoDiff
+#| fig-cap: GeoDiff PCA diagnostic summary showing score plots for key metadata variables and the explained-variance scree plot.
+#| fig-width: 10
+#| fig-height: 10.5
+# PCAtools plotting may emit benign ggplot2 deprecation warnings.
+
+if (!is.null(geodiff_pca_res) && !is.null(geodiff_pheno)) {
+  geodiff_pca_panels <- run_pca_panel_workflow(
+    pca_res = geodiff_pca_res,
+    pheno = geodiff_pheno,
+    method_label = "GeoDiff",
+    main_file = "GeoDiff_PCA2.png"
+  )
+
+  suppress_known_pca_render_warnings(print(geodiff_pca_panels$main_plot))
+} else {
+  message(geodiff_eda_skip_message)
+}
+
+```
+
+:::
+
+# Variance partition analysis
+
+This section quantifies **where the variation in expression comes from**. For each
+gene, `variancePartition` fits a mixed model and works out the percentage of that
+gene's expression variance explained by each study variable, then summarises the
+result across all genes as a violin plot. It complements the eigencorrelation
+heatmaps above: eigencorrelation links metadata to a handful of principal
+components, while variance partition gives a direct, genome-wide read on how much
+each variable matters.
+
+::: {.callout-note}
+## What this shows
+Each violin is the distribution, across genes, of the percentage of expression
+variance attributed to one variable. A tall violin reaching high percentages means
+that variable is a strong driver of expression (for example a slide or patient
+effect); a violin squashed near zero means it explains little. The **Residuals**
+violin is the variance left unexplained by the model. Use this to decide which
+variables to include as covariates or random effects in the differential-expression
+model (`5_Differential_Expression_Calculation.qmd`): variables that explain a large,
+unwanted share of variance are good candidates to adjust for.
+
+Categorical variables (set in `varpart_categorical`) are modelled as random effects;
+continuous variables (`varpart_continuous`) enter as fixed numeric terms. Variables
+that are constant or unique to a single segment are dropped automatically.
+:::
+
+::: {.callout-tip}
+## Runtime
+The mixed model is fitted for every gene, so this step can be slow on large
+datasets. Set `varpart_max_genes` to a positive number (for example `2000`) to fit
+only the most variable genes for a faster preview; leave it at `0` to use all genes.
+:::
+
+::: {.panel-tabset group="eda-normalization"}
+#### TMM normalization
+
+```{r varpart-tmm}
+#| message: false
+#| warning: false
+#| label: fig-VarPart-TMM
+#| fig-cap: TMM variance partition violin plot showing the percentage of expression variance explained by each study variable, with Residuals as unexplained variance.
+#| fig-width: 9
+#| fig-height: 5.5
+
+if (isTRUE(params$varpart_run)) {
+  tmm_vp_expr  <- cpm(TMM_norm_data, log = TRUE)
+  tmm_vp_pheno <- TMM_norm_data[["samples"]]
+  tmm_varpart  <- run_varpart(tmm_vp_expr, tmm_vp_pheno, label = "TMM")
+  if (isTRUE(tmm_varpart$ok)) {
+    print(tmm_varpart$plot + ggtitle("TMM variance partition") + title_theme)
+    if (isTRUE(params$save_plots)) {
+      save_plot(filename = FIG("TMM_varpart.png"), plot = tmm_varpart$plot,
+                base_height = 6, base_width = 9, bg = "white")
+    }
+  } else {
+    cat("Variance partition could not be computed for TMM:", tmm_varpart$message, "\n")
+  }
+} else {
+  cat("Variance partition analysis is disabled (varpart_run: false).\n")
+}
+
+```
+
+#### Q3 normalization
+
+```{r varpart-q3}
+#| message: false
+#| warning: false
+#| label: fig-VarPart-Q3
+#| fig-cap: Q3 variance partition violin plot showing the percentage of expression variance explained by each study variable. Compare with the TMM and GeoDiff results.
+#| fig-width: 9
+#| fig-height: 5.5
+
+if (isTRUE(params$varpart_run)) {
+  q3_vp_expr  <- log2(assayDataElement(target_spatialData, elt = "q_norm"))
+  q3_vp_pheno <- pData(target_spatialData)
+  q3_varpart  <- run_varpart(q3_vp_expr, q3_vp_pheno, label = "Q3")
+  if (isTRUE(q3_varpart$ok)) {
+    print(q3_varpart$plot + ggtitle("Q3 variance partition") + title_theme)
+    if (isTRUE(params$save_plots)) {
+      save_plot(filename = FIG("Q3_varpart.png"), plot = q3_varpart$plot,
+                base_height = 6, base_width = 9, bg = "white")
+    }
+  } else {
+    cat("Variance partition could not be computed for Q3:", q3_varpart$message, "\n")
+  }
+} else {
+  cat("Variance partition analysis is disabled (varpart_run: false).\n")
+}
+
+```
+
+#### GeoDiff-normalized normmat
+
+```{r varpart-geodiff}
+#| message: false
+#| warning: false
+#| label: fig-VarPart-GeoDiff
+#| fig-cap: GeoDiff variance partition violin plot showing the percentage of expression variance explained by each study variable. Compare with the TMM and Q3 results.
+#| fig-width: 9
+#| fig-height: 5.5
+
+if (isTRUE(params$varpart_run)) {
+  if (geodiff_eda_available && !is.null(target_spatialData_GeoDiff)) {
+    geodiff_vp_expr  <- na.omit(assayDataElement(target_spatialData_GeoDiff, elt = "normmat"))
+    geodiff_vp_pheno <- pData(target_spatialData_GeoDiff)
+    geodiff_varpart  <- run_varpart(geodiff_vp_expr, geodiff_vp_pheno, label = "GeoDiff")
+    if (isTRUE(geodiff_varpart$ok)) {
+      print(geodiff_varpart$plot + ggtitle("GeoDiff variance partition") + title_theme)
+      if (isTRUE(params$save_plots)) {
+        save_plot(filename = FIG("GeoDiff_varpart.png"), plot = geodiff_varpart$plot,
+                  base_height = 6, base_width = 9, bg = "white")
+      }
+    } else {
+      cat("Variance partition could not be computed for GeoDiff:", geodiff_varpart$message, "\n")
+    }
+  } else {
+    cat(geodiff_eda_skip_message, "\n")
+  }
+} else {
+  cat("Variance partition analysis is disabled (varpart_run: false).\n")
+}
+
+```
+
+:::
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
+:::

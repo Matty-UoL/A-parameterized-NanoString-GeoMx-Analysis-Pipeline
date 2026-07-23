@@ -1,0 +1,16 @@
+Third-party data notice
+=======================
+
+The bundled example dataset under Example_Dataset/Data/ is derived from NCBI GEO
+accession GSE226829 (Carpenter et al., Cancer Discovery, 2023):
+
+    https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE226829
+
+That data remains subject to the terms under which it was deposited and is not
+covered by this repository's CC BY 4.0 licence. If you use the example data,
+please cite the original study and acknowledge GEO.
+
+The spatial deconvolution reference Pancreas_HCA.RData is redistributed from the
+NanoString Biostats CellProfileLibrary:
+
+    https://github.com/Nanostring-Biostats/CellProfileLibrary

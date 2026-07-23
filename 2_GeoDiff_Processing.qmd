@@ -1,0 +1,937 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "GeoDiff Based Quality Control"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+    include-in-header:
+      text: |
+        <style>
+          :root {
+            --bs-body-font-family: "Segoe UI", Arial, sans-serif;
+            --bs-font-sans-serif: "Segoe UI", Arial, sans-serif;
+            --bs-code-font-family: "Segoe UI", Arial, sans-serif;
+            --bs-font-monospace: "Segoe UI", Arial, sans-serif;
+          }
+
+          html,
+          body,
+          body :not(.bi):not([class^="bi-"]):not([class*=" bi-"]),
+          button,
+          input,
+          select,
+          textarea,
+          table,
+          caption,
+          figcaption,
+          code,
+          pre,
+          kbd,
+          samp,
+          .sourceCode,
+          .sourceCode *,
+          .cell-output,
+          .cell-output *,
+          .cell-output-display,
+          .cell-output-display *,
+          .dataTables_wrapper,
+          .dataTables_wrapper *,
+          .table,
+          .table *,
+          .sidebar,
+          .sidebar *,
+          #TOC,
+          #TOC *,
+          .callout {
+            font-family: "Segoe UI", Arial, sans-serif !important;
+          }
+
+          .protocol-summary-table {
+            width: 100% !important;
+            margin-bottom: 1.5rem;
+          }
+
+          .protocol-summary-table th,
+          .protocol-summary-table td {
+            padding: 0.65rem 0.8rem !important;
+            vertical-align: middle;
+          }
+
+          .protocol-summary-table thead th {
+            white-space: nowrap;
+          }
+        </style>
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+
+params:
+  # Root detection, same pattern as QC
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+  dir_src: "src"
+
+  # Fixed folder names under root
+  dir_outputs: "Outputs"
+
+  # Where to read the QC-pass object from
+  qc_stage: "1_QC"
+  qc_results_dir: "results"
+  qc_pass_rds: "QC_pass_spatial_data.RDS"   # keep case consistent
+
+  # GeoDiff stage output location
+  out_stage: "2_GeoDiff"
+  out_results: "results"
+
+  # Save toggles
+  save_rds: true
+  # Also save the GeoDiff background-fit diagnostic plots as 300 dpi PNGs
+  # (manuscript Figure 3 panels A-D). Base-graphics plots are saved via a png()
+  # device rather than ggsave().
+  save_plots: true
+
+  # GeoDiff behaviour
+  seed: 123
+  split_var: "slide_name"          # Optional second-pass split variable. Leave blank ("") for single-slide/no-split studies.
+  fallback_group_var: "segment"    # used for report grouping when split_var is blank
+  bg_pvalue_threshold: 1e-3
+  rerun_dispersion_threshold: 2    # Refit Poisson background only when initial dispersion exceeds this threshold.
+  rerun_when_high_dispersion: true # If false, keep first-pass model even when dispersion exceeds threshold.
+  mask_outliers_before_rerun: true # If true, set detected outlier cells to NA before optional rerun.
+
+  # QuanRange settings
+  quanrange_probs: [0.75, 0.8, 0.9, 0.95]
+  quanrange_split: false         # If true, QuanRange estimates quantile factors within split_var groups; false uses one global estimate, which is more stable for small or uneven groups.
+
+  # Segment (AOI) filtering settings (final keep list)
+  roi_para_quantile: 0.90
+  roi_signal_threshold: 2
+
+  # Optional metadata diagnostics
+  disease_col: "disease_status"
+---
+
+# GeoDiff processing (2)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook is written for users applying the workflow to their own dataset. Read each section in order, confirm required inputs before running code sections, and use the YAML parameters at the top of the file to adapt paths and thresholds for your study design.
+:::
+
+::: {.callout-warning collapse="true"}
+## Before you run
+Validate input data and metadata column names first. Most runtime issues in protocol use are caused by path mismatches, missing files, or dataset-specific column naming differences.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+::: {.callout-caution collapse="true"}
+## Reproducibility caution
+When editing parameters, record exactly what changed (paths, thresholds, model options) in your run notes so later figures and conclusions can be reproduced during review and publication.
+:::
+
+This notebook runs the **GeoDiff filtering stage** for GeoMx data after QC.
+
+A segment, or area of illumination (AOI), is the profiled GeoMx collection area within a region of interest (ROI). One ROI may contain several segments (for example PanCK, A-SMA, CD45, Stroma). The segment is the unit of data in this pipeline: one segment corresponds to one DCC file and one column of the GeoMx object, so all counts reported below are segment counts.
+
+## What this step does
+
+The workflow applies model-based background estimation, identifies features and segments to retain, and writes a filtered object for normalisation and differential expression.
+
+## Why this matters
+
+This step moves from broad QC filtering to model-based feature/segment selection. Decisions made here directly affect normalisation behaviour and differential expression model stability in later stages.
+
+::: {.callout-important}
+## What later comparisons cover
+The saved `GeoDiff_spatial_data.RDS` object is the **GeoDiff-filtered count object**. It contains count-like expression values after GeoDiff background modeling, probe aggregation, high-signal feature marking, and segment retention filtering. It is not the GeoDiff-normalized `normmat` matrix created in `3_Normalisation.qmd`.
+
+Later comparisons between GeoDiff-filtered and non-GeoDiff DE branches therefore reflect both this filtering step and the chosen normalization/modeling path. Treat those outputs as comparisons of whole workflow paths, not of normalization alone.
+:::
+
+## What you decide next
+
+- If model diagnostics and retained segment/feature patterns look acceptable, proceed to `3_Normalisation.qmd`.
+- If diagnostics indicate poor fit or excessive filtering, adjust GeoDiff parameters and rerun before moving forward.
+
+This document explains **what is being computed and why**. It intentionally avoids interpretation of output values.
+
+This workflow is outlined in the following references:
+
+- [GeoDiff Bioconductor workflow vignette (kidney WTA example)](https://bioconductor.org/packages/devel/bioc/vignettes/GeoDiff/inst/doc/Workflow_WTA_kidney.html)
+- [GeoDiff preprint describing the statistical framework](https://www.biorxiv.org/content/10.1101/2022.05.26.493637v1.full)
+
+## Load libraries
+
+Load package dependencies required for GeoDiff modelling, plotting, and file handling.
+
+```{r load-libraries}
+#| output: false
+#| message: false
+#| warning: false
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(tidyverse)
+library(GeoDiff)
+library(fs)
+library(here)
+library(glue)
+
+protocol_kable <- function(data, ...) {
+  # Suppress known xfun/knitr table-attribute deprecation noise while retaining
+  # the rendered audit table in the protocol output.
+  table_html <- suppressWarnings(
+    as.character(
+      knitr::kable(
+        data,
+        ...,
+        format = "html",
+        table.attr = 'class="table table-striped table-hover protocol-summary-table"'
+      )
+    )
+  )
+  knitr::asis_output(table_html)
+}
+
+format_protocol_number <- function(x, digits = 6) {
+  vapply(
+    x,
+    function(value) {
+      if (!is.finite(value)) {
+        return("Not available")
+      }
+      format(
+        signif(value, digits = digits),
+        scientific = FALSE,
+        trim = TRUE,
+        big.mark = ","
+      )
+    },
+    character(1)
+  )
+}
+
+format_metric_summary <- function(summary_table) {
+  summary_table %>%
+    tidyr::pivot_wider(names_from = "statistic", values_from = "value") %>%
+    dplyr::mutate(dplyr::across(-metric, format_protocol_number)) %>%
+    dplyr::rename(Metric = metric)
+}
+```
+
+## Setup paths
+
+Resolve input/output locations from YAML params and create stage output directories.
+
+```{r setup-paths}
+#| label: setup-paths
+#| message: false
+#| warning: false
+
+# Root resolution, same as your QC script
+root <- params$project_root
+# Auto-detect root during interactive runs when YAML root is blank/placeholder.
+if (is.null(root) || root == "" || root == ".") {
+  root <- here::here()
+} else {
+  # Normalize user-supplied root for cross-platform path consistency.
+  root <- path_abs(root)
+}
+
+# here()-first helper with explicit YAML-root override when provided.
+root_via_here <- path_abs(here::here())
+use_here_root <- identical(path_abs(root), root_via_here)
+project_path <- function(...) {
+  if (use_here_root) {
+    here::here(...)
+  } else {
+    path(root, ...)
+  }
+}
+dir_src <- project_path(params$dir_src)
+path_utilities_path <- path(dir_src, "pathUtilities.R")
+if (!file_exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+
+# QC input path
+qc_pass_path <- project_path(
+  params$dir_outputs,
+  params$qc_stage,
+  params$qc_results_dir,
+  params$qc_pass_rds
+)
+
+# GeoDiff output paths
+out_base    <- project_path(params$dir_outputs, params$out_stage)
+out_results <- path(out_base, params$out_results)
+# Figure output directory, consistent with the figures/ convention used by later stages.
+out_figures <- path(out_base, "figures")
+geodiff_rds_path <- protocol_contract_path(
+  out_results,
+  "GeoDiff_spatial_data.RDS",
+  portable_path_limit,
+  "Stage 2 GeoDiff object"
+)
+stage2_path_audit <- protocol_path_audit(
+  c(
+    "Stage 1 QC input" = qc_pass_path,
+    "Stage 2 GeoDiff object" = geodiff_rds_path
+  ),
+  portable_path_limit
+)
+protocol_assert_audit(stage2_path_audit, portable_path_limit)
+knitr::kable(stage2_path_audit, caption = "Stage 2 path-portability audit")
+
+# Create folders
+dir_create(out_results, recurse = TRUE)
+# Create the figure directory only when plot saving is requested.
+if (isTRUE(params$save_plots)) dir_create(out_figures, recurse = TRUE)
+
+message(glue::glue("ROOT: {root}"))
+message(glue::glue("QC input: {qc_pass_path}"))
+message(glue::glue("GeoDiff output base: {out_base}"))
+
+```
+
+## Load QC-pass input
+
+Read the QC-pass object from stage 1 and confirm basic feature composition before modelling.
+
+```{r load-qc-pass-data}
+
+spatial_data <- readRDS(qc_pass_path)
+
+featureType(spatial_data)
+paste("## of Negative Probes:", sum(fData(spatial_data)$Negative))
+```
+
+## Fit background model
+
+Fit Poisson background models and run diagnostics used to configure the next processing steps.
+
+```{r fit-initial-background-model}
+# `fitPoisBG` estimates per-feature background under a Poisson model (no split first pass).
+spatial_data_no_split <- fitPoisBG(spatial_data)
+
+summarise_numeric_metric <- function(x, metric) {
+  x_num <- suppressWarnings(as.numeric(x))
+  x_num <- x_num[is.finite(x_num)]
+
+  if (length(x_num) == 0) {
+    return(tibble::tibble(
+      metric = metric,
+      statistic = "No finite numeric values",
+      value = NA_real_
+    ))
+  }
+
+  tibble::tibble(
+    metric = metric,
+    statistic = c("Minimum", "1st quartile", "Median", "Mean", "3rd quartile", "Maximum"),
+    value = c(
+      min(x_num),
+      as.numeric(stats::quantile(x_num, probs = 0.25, names = FALSE)),
+      stats::median(x_num),
+      mean(x_num),
+      as.numeric(stats::quantile(x_num, probs = 0.75, names = FALSE)),
+      max(x_num)
+    )
+  )
+}
+
+initial_fit_summary <- dplyr::bind_rows(
+  summarise_numeric_metric(pData(spatial_data_no_split)$sizefact, "Sample size factor"),
+  summarise_numeric_metric(
+    fData(spatial_data_no_split)$featfact[fData(spatial_data_no_split)$Negative],
+    "Negative-probe feature factor"
+  )
+)
+
+initial_fit_summary_display <- format_metric_summary(initial_fit_summary)
+```
+
+```{r}
+#| label: tbl-initial-background-summary
+#| tbl-cap: Initial no-split GeoDiff background model summary statistics. Values are shown without scientific notation to support direct comparison across statistics.
+#| results: asis
+
+protocol_kable(
+  initial_fit_summary_display,
+  align = c("l", rep("r", ncol(initial_fit_summary_display) - 1L))
+)
+```
+
+```{r}
+#| label: fig-initial-poisson-model
+#| fig-cap: QQ plot of the initial GeoDiff Poisson background model fit. Major departures from the expected line may indicate model misfit before outlier masking.
+#| fig-width: 6
+#| fig-height: 6
+
+set.seed(params$seed)
+# `diagPoisBG` computes QQ-style diagnostics and outlier masks for the fitted model.
+spatial_data_no_split <- diagPoisBG(spatial_data_no_split)
+
+# Save the just-drawn base-graphics QQ plot as a 300 dpi PNG (manuscript Figure 3A).
+# Base graphics cannot use ggsave(); recordPlot()/replayPlot() re-saves the rendered
+# plot at 300 dpi without recomputing diagPoisBG.
+if (isTRUE(params$save_plots)) {
+  try({
+    .geodiff_initial_qq <- grDevices::recordPlot()
+    grDevices::png(path(out_figures, "initial_poisson_qq.png"),
+                   width = 6, height = 6, units = "in", res = 300)
+    grDevices::replayPlot(.geodiff_initial_qq)
+    grDevices::dev.off()
+  }, silent = TRUE)
+}
+initial_dispersion <- notes(spatial_data_no_split)$disper
+message(glue::glue("Initial no-split dispersion estimate: {round(initial_dispersion, 4)}"))
+```
+
+```{r}
+#| label: tbl-initial-dispersion
+#| tbl-cap: Initial GeoDiff dispersion estimate and the YAML-configured threshold used to decide whether the background model should be refitted.
+#| results: asis
+
+initial_dispersion_table <- tibble::tibble(
+  Metric = "Initial no-split dispersion",
+  `Observed value` = format_protocol_number(initial_dispersion),
+  `Rerun threshold` = format_protocol_number(params$rerun_dispersion_threshold)
+)
+
+protocol_kable(
+  initial_dispersion_table,
+  align = c("l", "r", "r")
+)
+```
+
+## Review detected outliers (scrollable tables)
+
+Use the initial diagnostic outputs to identify outlier entries before second-pass fitting.  
+These tables show exactly which feature/sample positions were masked before the second model fit.
+
+```{r inspect-outlier-indices}
+#| label: tbl-initial-outlier-indices
+#| tbl-cap: Detected outlier indices from the initial GeoDiff diagnostics. Use the searchable table to audit the feature and sample positions considered for masking before an optional refit.
+#| message: false
+#| warning: false
+
+build_outlier_table <- function(outlier_matrix, outlier_label) {
+  idx <- which(outlier_matrix == 1, arr.ind = TRUE)
+  if (nrow(idx) == 0) {
+    return(tibble::tibble(
+      outlier_type = outlier_label,
+      note = "No outliers detected for this class."
+    ))
+  }
+
+  tibble::tibble(
+    outlier_type = outlier_label,
+    feature_index = idx[, 1],
+    sample_index = idx[, 2],
+    feature_name = rownames(outlier_matrix)[idx[, 1]],
+    sample_name = colnames(outlier_matrix)[idx[, 2]]
+  )
+}
+
+up_outlier_tbl <- build_outlier_table(
+  assayDataElement(spatial_data_no_split, "up_outlier"),
+  "up_outlier"
+)
+
+low_outlier_tbl <- build_outlier_table(
+  assayDataElement(spatial_data_no_split, "low_outlier"),
+  "low_outlier"
+)
+
+all_outlier_tbl <- dplyr::bind_rows(up_outlier_tbl, low_outlier_tbl)
+
+DT::datatable(
+  all_outlier_tbl,
+  rownames = FALSE,
+  class = "stripe hover cell-border nowrap",
+  options = list(
+    scrollX = TRUE,
+    scrollY = "320px",
+    paging = TRUE,
+    pageLength = 25,
+    dom = "tip"
+  )
+)
+
+```
+
+The next step applies an explicit rerun policy for protocol users:
+
+- if initial dispersion is above `params$rerun_dispersion_threshold`, the notebook can rerun the Poisson background fit;
+- if dispersion is within range, the notebook keeps the first-pass fit and does not rerun;
+- optional outlier masking before rerun is controlled by `params$mask_outliers_before_rerun`.
+
+```{r optional-rerun-decision}
+#| message: true
+#| warning: true
+
+# Decision rule for optional refit:
+# - Refit only if initial dispersion is above threshold and rerun toggle is enabled.
+dispersion_threshold <- params$rerun_dispersion_threshold
+dispersion_is_high <- is.finite(initial_dispersion) && (initial_dispersion > dispersion_threshold)
+rerun_enabled <- isTRUE(params$rerun_when_high_dispersion)
+run_optional_rerun <- rerun_enabled && dispersion_is_high
+
+if (!rerun_enabled) {
+  message("Optional Poisson rerun is disabled via params$rerun_when_high_dispersion = FALSE.")
+} else if (!dispersion_is_high) {
+  message(
+    glue::glue(
+      "Dispersion ({round(initial_dispersion, 4)}) <= threshold ({dispersion_threshold}); ",
+      "skipping rerun and keeping first-pass model."
+    )
+  )
+} else {
+  message(
+    glue::glue(
+      "Dispersion ({round(initial_dispersion, 4)}) > threshold ({dispersion_threshold}); ",
+      "running optional rerun path."
+    )
+  )
+}
+
+if (run_optional_rerun && isTRUE(params$mask_outliers_before_rerun)) {
+  message("Masking up_outlier/low_outlier entries as NA before optional rerun.")
+  assayDataElement(spatial_data, "exprs")[assayDataElement(spatial_data_no_split, "up_outlier") == 1] <- NA
+  assayDataElement(spatial_data, "exprs")[assayDataElement(spatial_data_no_split, "low_outlier") == 1] <- NA
+} else if (run_optional_rerun) {
+  message("Rerun enabled without outlier masking (params$mask_outliers_before_rerun = FALSE).")
+}
+
+# Keep first-pass fitted object when rerun is skipped.
+if (!run_optional_rerun) {
+  spatial_data <- spatial_data_no_split
+}
+
+```
+
+```{r refit-background-model-if-required}
+#| eval: !expr exists("run_optional_rerun") && run_optional_rerun == TRUE
+
+# Refit Poisson background only when optional rerun decision is TRUE.
+spatial_data <- fitPoisBG(spatial_data)
+
+```
+
+```{r}
+#| eval: !expr (!exists("run_optional_rerun") || run_optional_rerun == FALSE)
+#| message: true
+#| warning: false
+
+message("Optional rerun was skipped; using first-pass no-split fitted object for later steps.")
+```
+
+```{r resolve-final-background-model}
+# Helper: treat NULL, "", or whitespace-only input as "blank".
+is_blank_value <- function(x) {
+  if (is.null(x)) return(TRUE)
+  if (length(x) == 0) return(TRUE)
+  x_chr <- trimws(as.character(x[[1]]))
+  is.na(x_chr) || x_chr == ""
+}
+
+split_var <- params$split_var
+fallback_group_var <- params$fallback_group_var
+split_var_is_blank <- is_blank_value(split_var)
+
+# Track whether split fitting was actually run successfully.
+use_split <- FALSE
+
+# Validate the fallback grouping column because report summaries rely on it.
+if (is_blank_value(fallback_group_var) || !(fallback_group_var %in% colnames(pData(spatial_data)))) {
+  stop(
+    "fallback_group_var must be a non-blank metadata column in pData(spatial_data). ",
+    "Current value: '", fallback_group_var, "'."
+  )
+}
+
+if (split_var_is_blank) {
+  message("No split variable provided -> running non-split path.")
+  message(glue::glue("Fallback grouping variable for diagnostics: {fallback_group_var}"))
+  fallback_counts <- table(pData(spatial_data)[[fallback_group_var]], useNA = "ifany")
+  fit_group_counts <- tibble::tibble(
+    `Grouping variable` = fallback_group_var,
+    Group = names(fallback_counts),
+    `Segment count` = as.integer(fallback_counts)
+  )
+} else {
+  # Keep requiring the user-specified split column when split_var is provided.
+  if (!(split_var %in% colnames(pData(spatial_data)))) {
+    stop(
+      "split_var column '", split_var, "' was not found in pData(spatial_data). ",
+      "Available columns include: ", paste(colnames(pData(spatial_data)), collapse = ", ")
+    )
+  }
+
+  message(glue::glue("Split variable provided: {split_var} -> running split-aware path."))
+
+  # fitPoisBG(..., split_var) can fail with NaN when a split level has too few
+  # segments (e.g. only one segment in a slide), so validate split groups first.
+  split_counts <- table(pData(spatial_data)[[split_var]], useNA = "ifany")
+  fit_group_counts <- tibble::tibble(
+    `Grouping variable` = split_var,
+    Group = names(split_counts),
+    `Segment count` = as.integer(split_counts)
+  )
+  n_non_missing_levels <- sum(split_counts > 0 & !is.na(names(split_counts)))
+
+  if (n_non_missing_levels < 2) {
+    message(
+      glue::glue(
+        "Split-aware GeoDiff fitting skipped: split variable '{split_var}' has fewer than 2 ",
+        "non-missing levels in this dataset. Continuing with non-split fit ",
+        "(single-slide/no-split mode)."
+      )
+    )
+  } else if (all(split_counts >= 2)) {
+    # Minimal rule: require at least 2 segments per split level.
+    # Still guard runtime failures and fall back to non-split fit.
+    spatial_data <- tryCatch(
+      {
+        # Split-mode fit estimates background separately per split level (e.g., slide).
+        tmp <- fitPoisBG(spatial_data, split_var)
+        use_split <- TRUE
+        tmp
+      },
+      # If split-mode fit fails, preserve previously fitted non-split object.
+      error = function(e) {
+        message(
+          glue::glue(
+            "Split-aware fitPoisBG failed ({conditionMessage(e)}). ",
+            "Continuing with non-split fit."
+          )
+        )
+        spatial_data
+      }
+    )
+  } else {
+    # Report problematic levels so users can decide whether to collapse/relabel groups.
+    bad_levels <- names(split_counts)[split_counts < 2]
+    message(
+      glue::glue(
+        "Split-aware GeoDiff fitting skipped: {split_var} levels with <2 segments: ",
+        "{paste(bad_levels, collapse = ', ')}. Continuing with non-split fit."
+      )
+    )
+  }
+}
+
+final_fit_summary <- dplyr::bind_rows(
+  summarise_numeric_metric(pData(spatial_data)$sizefact, "Final sample size factor"),
+  summarise_numeric_metric(
+    fData(spatial_data)$featfact[fData(spatial_data)$Negative],
+    "Final negative-probe feature factor"
+  )
+)
+
+final_fit_summary_display <- format_metric_summary(final_fit_summary)
+```
+
+```{r}
+#| label: tbl-background-fit-groups
+#| tbl-cap: Segment counts for the YAML-selected grouping variable used to assess whether split-aware GeoDiff background fitting is stable.
+#| results: asis
+
+protocol_kable(
+  fit_group_counts,
+  align = c("l", "l", "r")
+)
+```
+
+```{r}
+#| label: tbl-final-background-summary
+#| tbl-cap: Final GeoDiff background model summary statistics used by later pipeline stages.
+#| results: asis
+
+protocol_kable(
+  final_fit_summary_display,
+  align = c("l", rep("r", ncol(final_fit_summary_display) - 1L))
+)
+```
+
+```{r}
+#| label: fig-final-poisson-model
+#| fig-cap: QQ plot of the final GeoDiff Poisson background model after the configured split or no-split fitting path. Major departures from the expected line may indicate residual model misfit before probe aggregation and segment filtering.
+#| fig-width: 6
+#| fig-height: 6
+
+set.seed(params$seed)
+# Diagnostics
+# Run diagnostics on the final model; `split` matches whether split-fit succeeded.
+spatial_data <- diagPoisBG(spatial_data, split = use_split)
+
+# Save the final background-model QQ plot as a 300 dpi PNG (manuscript Figure 3B).
+if (isTRUE(params$save_plots)) {
+  try({
+    .geodiff_final_qq <- grDevices::recordPlot()
+    grDevices::png(path(out_figures, "final_poisson_qq.png"),
+                   width = 6, height = 6, units = "in", res = 300)
+    grDevices::replayPlot(.geodiff_final_qq)
+    grDevices::dev.off()
+  }, silent = TRUE)
+}
+final_dispersion <- notes(spatial_data)$disper
+```
+
+```{r}
+#| label: tbl-final-dispersion
+#| tbl-cap: Final GeoDiff dispersion estimate after the selected background-model fitting path.
+#| results: asis
+
+final_dispersion_table <- tibble::tibble(
+  Metric = "Final model dispersion",
+  `Observed value` = format_protocol_number(final_dispersion)
+)
+
+protocol_kable(
+  final_dispersion_table,
+  align = c("l", "r")
+)
+```
+
+The diagnostic output below provides additional context for negative-probe average count behaviour after fitting.
+
+```{r plot-negative-probe-average-count}
+#| label: fig-negative-probe-average-count
+#| fig-cap: Distribution of average negative-probe counts after final GeoDiff background fitting. A strongly skewed or multimodal distribution may indicate residual background structure that should be reviewed before proceeding.
+#| fig-width: 7
+#| fig-height: 5
+
+hist(fData(spatial_data)$featfact[fData(spatial_data)$Negative]/dim(spatial_data)[2], xlab="Probe average count", main="Negative probe average count distribution")
+
+# Save the negative-probe average-count histogram as a 300 dpi PNG (manuscript Figure 3C).
+if (isTRUE(params$save_plots)) {
+  grDevices::png(path(out_figures, "negative_probe_avg_count.png"),
+                 width = 7, height = 5, units = "in", res = 300)
+  hist(fData(spatial_data)$featfact[fData(spatial_data)$Negative]/dim(spatial_data)[2], xlab="Probe average count", main="Negative probe average count distribution")
+  grDevices::dev.off()
+}
+
+```
+
+## Aggregate probes
+
+Collapse probes using correlation-based aggregation after removing all-zero probes.
+
+```{r aggregate-probes}
+all0probeidx <- which(rowSums(exprs(spatial_data))==0)
+# Remove all-zero probes before aggregation to avoid undefined/degenerate correlations.
+if (length(all0probeidx) > 0) {
+    spatial_data <- spatial_data[-all0probeidx, ]
+}
+
+# Run correlation-based aggregation for remaining probes.
+spatial_data <- aggreprobe(spatial_data, use = "cor")
+```
+
+## Background score test
+
+Run GeoDiff background score testing and compute how many probes pass the configured p-value threshold.
+
+```{r run-bgscore-test}
+# `BGScoreTest` computes feature-level p-values versus estimated background signal.
+# `useprior=TRUE` enables GeoDiff prior regularisation for more stable small-count behavior.
+spatial_data <- BGScoreTest(spatial_data,useprior = TRUE)
+
+
+sum(fData(spatial_data)[["pvalues"]] < params$bg_pvalue_threshold, na.rm = TRUE)
+
+```
+
+## Estimate size factors and quantile ranges
+
+Estimate signal-related size factors and quantify agreement across selected quantiles.
+
+::: callout-note
+A seed is set because this process uses random sampling.
+:::
+
+```{r estimate-size-factors-and-quanrange}
+#| label: fig-bgScoreComparison
+#| fig-cap: Scatter plot of GeoDiff size factor versus QC signal factor. Strong positive agreement supports the selected normalization and segment filtering settings.
+#| fig-width: 6
+#| fig-height: 6
+
+
+# Seed
+set.seed(params$seed)
+
+
+
+# `fitNBth` fits NB-based signal model and learns thresholded high-signal features/segments.
+spatial_data <- fitNBth(spatial_data, split = use_split)
+# Keep only probes flagged as high-signal by GeoDiff NB-threshold model.
+features_high <- rownames(fData(spatial_data))[fData(spatial_data)$feature_high_fitNBth == 1]
+
+length(features_high)
+
+bgMean <- mean(fData(spatial_data)$featfact, na.rm = TRUE)
+
+notes(spatial_data)[["threshold"]]
+bgMean
+
+notes(spatial_data)$bgMean <- bgMean
+
+# Compare background-derived and signal-derived size factors; high correlation is expected.
+cor(spatial_data$sizefact, spatial_data$sizefact_fitNBth)
+
+plot(spatial_data$sizefact, spatial_data$sizefact_fitNBth, xlab = "Background Size Factor",
+     ylab = "Signal Size Factor")
+abline(a = 0, b = 1)
+
+# Save the background-vs-signal size-factor scatter as a 300 dpi PNG (manuscript Figure 3D).
+if (isTRUE(params$save_plots)) {
+  grDevices::png(path(out_figures, "size_factor_scatter.png"),
+                 width = 6, height = 6, units = "in", res = 300)
+  plot(spatial_data$sizefact, spatial_data$sizefact_fitNBth, xlab = "Background Size Factor",
+       ylab = "Signal Size Factor")
+  abline(a = 0, b = 1)
+  grDevices::dev.off()
+}
+
+# get only biological probes
+posdat <- spatial_data[-which(fData(spatial_data)$CodeClass == "Negative"), ]
+posdat <- exprs(posdat)
+
+quanrange_probs <- unlist(params$quanrange_probs)
+
+quan <- sapply(quanrange_probs, function(y)
+  # For each quantile y, compute per-segment quantile across positive probes.
+  apply(posdat, 2, function(x) quantile(x, probs = y)))
+
+# Correlate each quantile-derived factor against GeoDiff signal size factor.
+corrs <- apply(quan, 2, function(x) cor(x, spatial_data$sizefact_fitNBth))
+names(corrs) <- as.character(quanrange_probs)
+
+corrs
+
+# `QuanRange` writes quantile-based scaling factors (e.g., Q75/Q80/Q90/Q95) to pData
+# so we can compare their agreement with GeoDiff signal size factors. Use split = TRUE
+# only when split_var defines sufficiently populated technical batches; keep the default
+# global estimate for small, single-slide, or uneven groups.
+spatial_data <- QuanRange(
+  spatial_data,
+  split = isTRUE(params$quanrange_split),
+  probs = quanrange_probs
+)
+
+corrs <- apply(pData(spatial_data)[, as.character(quanrange_probs)], 2, function(x)
+  # Re-evaluate quantile-vs-sizefactor correlations after QuanRange writes pData columns.
+  cor(x, spatial_data$sizefact_fitNBth))
+
+names(corrs) <- as.character(quanrange_probs)
+
+corrs
+```
+
+# Save GeoDiff-filtered count object
+
+Apply segment retention criteria from params and save the resulting GeoDiff-filtered count object for later stages.
+
+The retained-segment count reports how many segments remain after GeoDiff filtering. Use this number to confirm that filtering has preserved enough profiled segments for normalization and differential expression analysis.
+
+At this point, the saved object still carries count-like expression in `exprs`. Stage 3 uses this GeoDiff-filtered count data to create the GeoDiff-normalized `normmat` assay, and Stage 5 uses this same count data for count-based voom/dream branches.
+
+```{r identify-retained-geodiff-rois}
+
+
+ROIs_high <- sampleNames(spatial_data)[
+  # Retain segments whose adjusted signal exceeds configured threshold.
+  which(
+    (quantile(fData(spatial_data)[["para"]][, 1],
+              probs = params$roi_para_quantile, na.rm = TRUE) -
+       notes(spatial_data)[["threshold"]]) *
+      spatial_data$sizefact_fitNBth > params$roi_signal_threshold
+  )
+]
+
+# Optional diagnostic to check whether segment filtering has dropped an entire disease group.
+disease_col <- params$disease_col
+if (!is.null(disease_col) && disease_col %in% colnames(pData(spatial_data))) {
+  disease_before <- table(pData(spatial_data)[[disease_col]], useNA = "ifany")
+  disease_after <- table(pData(spatial_data)[ROIs_high, disease_col], useNA = "ifany")
+
+  disease_filter_table <- dplyr::full_join(
+    tibble::enframe(disease_before, name = disease_col, value = "roi_count_before_filtering"),
+    tibble::enframe(disease_after, name = disease_col, value = "roi_count_after_filtering"),
+    by = disease_col
+  ) %>%
+    dplyr::mutate(
+      roi_count_before_filtering = tidyr::replace_na(.data$roi_count_before_filtering, 0L),
+      roi_count_after_filtering = tidyr::replace_na(.data$roi_count_after_filtering, 0L)
+    )
+  disease_filter_table_display <- disease_filter_table %>%
+    dplyr::transmute(
+      `Disease state` = .data[[disease_col]],
+      `Segments before filtering` = .data$roi_count_before_filtering,
+      `Segments after filtering` = .data$roi_count_after_filtering
+    )
+
+
+  dropped_states <- setdiff(names(disease_before)[disease_before > 0], names(disease_after)[disease_after > 0])
+  if (length(dropped_states) > 0) {
+    message(
+      glue::glue(
+        "Review segment filtering: all segments were removed for disease states: ",
+        "{paste(dropped_states, collapse = ', ')}. Consider relaxing ",
+        "`roi_signal_threshold` or lowering `roi_para_quantile`."
+      )
+    )
+  }
+}
+```
+
+```{r}
+#| eval: !expr exists("disease_filter_table_display")
+#| label: tbl-disease-roi-retention
+#| tbl-cap: Disease-state segment counts before and after GeoDiff segment filtering. Confirm that each required study group retains enough segments for normalization and differential-expression modeling.
+#| results: asis
+
+protocol_kable(
+  disease_filter_table_display,
+  align = c("l", "r", "r")
+)
+```
+
+```{r save-geodiff-object}
+
+
+if (isTRUE(params$save_rds)) {
+  # Persist only retained segments for normalization and differential expression workflows.
+  saveRDS(spatial_data[, ROIs_high], file = geodiff_rds_path)
+}
+
+message(glue::glue("Saved GeoDiff-filtered count object: {geodiff_rds_path}"))
+message("GeoDiff-filtered count data summary: number of segments retained for later stages.")
+message(glue::glue("Segments retained: {length(ROIs_high)}"))
+
+
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
+:::

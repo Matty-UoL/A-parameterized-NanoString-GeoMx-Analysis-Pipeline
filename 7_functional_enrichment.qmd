@@ -1,0 +1,1610 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "Functional Enrichment"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+
+params:
+
+  # Project paths and shared folders
+  #
+  # project_root is the analysis project root that contains Outputs.
+  # Use "." only when rendering from the same project folder that contains the
+  # Outputs directory from earlier stages. If the notebooks live in a separate code
+  # repository, set this to the project folder where stage 5 wrote its outputs.
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+  dir_outputs: "Outputs"
+  dir_src: "src"
+  dir_data: "Data"
+
+  # Differential-expression stage read by this notebook
+  de_calc_stage: "5_DE"
+  de_calc_results_dir: "results"
+  de_calc_results_subdir: "de"
+
+  # This stage output structure
+  out_stage: "7_Enrichment"
+  out_results: "results"
+  out_tables: "tables"
+  out_figures: "figures"
+  enrichment_output_subdir: "enrichment"
+  comparison_output_subdir: "compare"
+
+  # Selected DE inputs
+  #
+  # selected_de_methods must match one or more method names written by stage 5.
+  # Current supported values are:
+  #   - "dream_GeoDiffCounts"
+  #   - "limma_voom_TMM"
+  #   - "limma_voom_GeoDiff" (GeoDiff-filtered count input)
+  #   - "limma_trend_Q3"
+  #   - "limma_trend_GeoDiff"
+  #
+  # The default follows the current recommended protocol route discussed in
+  # 6_Differential_Expression_Visualisation.qmd. Add methods here only after
+  # reviewing the stage 6 method inventory, overlap plots, correlation summaries,
+  # and selected-method figures.
+  # Two methods are selected so the cross-method pathway comparison section
+  # activates (it requires >= 2 selected methods). limma_trend_GeoDiff is the
+  # recommended GeoDiff route; limma_trend_Q3 is the Q3-normalised comparator
+  # (same engine, different normalisation) to test whether the pathway-level
+  # calls depend on the normalisation/filtering route.
+  selected_de_methods: ["limma_trend_GeoDiff", "limma_trend_Q3"]
+
+  # Leave blank to use all contrasts available inside each selected stage 5 method
+  # result object. Provide exact contrast names only when you want to restrict
+  # pathway enrichment to a smaller contrast set chosen in advance.
+  selected_contrasts:
+    value: []
+
+  # Enrichment collection controls
+  #
+  # GO is the generic default and does not require a GMT file.
+  run_go: true
+
+  # Additional gene set collections supplied as GMT files.
+  # Hallmark and Reactome are enabled by default. The Hallmark file is bundled
+  # in src/. The Reactome file must also be placed in src/ before the default
+  # render will run, because MSigDB downloads may require registration and
+  # acceptance of license terms. Set enabled: false to keep a record in the YAML
+  # without running it.
+  gmt_collections:
+    value:
+      - collection_name: "Hallmark"
+        gmt_file: "h.all.v2026.1.Hs.symbols.gmt"
+        term_prefix_to_strip: "HALLMARK_"
+        enabled: true
+      - collection_name: "Reactome"
+        gmt_file: "c2.cp.reactome.v2026.1.Hs.symbols.gmt"
+        term_prefix_to_strip: "REACTOME_"
+        enabled: true
+
+  # GSEA settings
+  ranking_metric: "signed_neg_log10_p"
+  go_ontology: "ALL"
+  gene_id_type: "SYMBOL"
+  go_orgdb_package: "org.Hs.eg.db"
+  gsea_pvalue_cutoff: 0.05
+  p_adjust_method: "BH"
+  min_gene_set_size: 8
+  max_gene_set_size: 500
+  fgsea_eps: 0
+
+  # Figure controls
+  seed: 123
+  dotplot_show_category: 15
+  fig_width_standard: 11
+  fig_height_standard: 8
+  fig_width_wide: 13
+  fig_height_wide: 8
+---
+
+<style>
+:root {
+  --bs-body-font-family: "Segoe UI", Arial, sans-serif;
+  --bs-font-sans-serif: "Segoe UI", Arial, sans-serif;
+  --bs-font-monospace: "Segoe UI", Arial, sans-serif;
+}
+
+html,
+body,
+body *:not(svg):not(path),
+button,
+input,
+select,
+textarea,
+caption,
+figcaption,
+.quarto-title-block,
+.quarto-title,
+.quarto-title-meta,
+.sidebar,
+.toc-active,
+.nav-page,
+.callout,
+.callout-title,
+.callout-body,
+.cell,
+.cell-output,
+.cell-output-display,
+.table,
+table,
+table *,
+.dataTable,
+.dataTable *,
+.dataTables_wrapper,
+.dataTables_wrapper *,
+.html-widget,
+.html-widget *,
+.sourceCode,
+pre,
+code,
+kbd,
+samp,
+svg text {
+  font-family: "Segoe UI", Arial, sans-serif !important;
+}
+
+.cell-output-display,
+.dataTables_wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+table,
+table:not(.dataTable) {
+  width: 100% !important;
+}
+
+td,
+th {
+  vertical-align: top;
+}
+
+.dataTables_wrapper table.dataTable,
+.dataTables_wrapper .dataTable {
+  width: max-content !important;
+  min-width: 100% !important;
+}
+
+.dataTables_wrapper th,
+.dataTables_wrapper td {
+  vertical-align: top;
+  white-space: nowrap !important;
+  overflow-wrap: normal;
+  word-break: normal;
+  min-width: 10rem;
+}
+
+.dataTables_wrapper th {
+  font-weight: 600;
+}
+
+.dataTables_wrapper .dataTables_scrollBody {
+  border-bottom: 1px solid #ddd;
+}
+
+.protocol-figure-note {
+  color: #555;
+  font-size: 0.95rem;
+  margin-top: -0.5rem;
+}
+</style>
+
+# Functional enrichment (7)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook performs pathway-level interpretation of differential-expression (DE) outputs from `5_Differential_Expression_Calculation.qmd`. It ranks genes for each selected method and contrast, runs Gene Set Enrichment Analysis (GSEA), and writes enrichment tables and figures that can be reviewed later.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+::: {.callout-important}
+## Required user decision
+Set `selected_de_methods` before rendering. The default method is `limma_trend_GeoDiff`, but users may add additional stage 5 method outputs when they want pathway-level method comparison. If `selected_contrasts` is blank, this notebook uses all contrasts available for each selected method, matching the automatic contrast discovery pattern used in `6_Differential_Expression_Visualisation.qmd`.
+:::
+
+::: {.callout-caution collapse="true"}
+## Model choice decision
+This notebook does not automatically choose the best DE model. Use `6_Differential_Expression_Visualisation.qmd` method comparison, selected-method gene-level inspection, and the pathway summaries below as evidence for a documented protocol decision.
+:::
+
+::: {.callout-note collapse="true"}
+## YAML parameter guide (7)
+The editable YAML is organized around the decisions a protocol user should make before pathway enrichment:
+
+1. Selected stage 5 DE method(s); contrasts are auto-discovered unless explicitly listed.
+2. GO and GMT collection settings.
+3. GSEA ranking and filtering settings.
+4. Figure dimensions.
+:::
+
+::: {.callout-important}
+## Required enrichment resources
+GO enrichment is run through the Bioconductor annotation package [`org.Hs.eg.db`](https://bioconductor.org/packages/org.Hs.eg.db/); no GO GMT file is required. Hallmark and Reactome enrichment are run from [MSigDB](https://www.gsea-msigdb.org/gsea/msigdb) GMT files listed in `gmt_collections`. The default Reactome collection expects `src/c2.cp.reactome.v2026.1.Hs.symbols.gmt`, where `src/` is resolved from `project_root` and `dir_src`; download this file from MSigDB and place it there before running the default notebook.
+:::
+
+## Load libraries
+
+```{r}
+#| output: false
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(fs)
+library(glue)
+library(knitr)
+library(DT)
+library(clusterProfiler)
+library(ggplot2)
+
+# Force GSEA (fgsea) to run serially. On Windows, BiocParallel defaults to a socket
+# cluster that launches one worker R process per core; for the large Reactome
+# collection this multiplied memory across many worker processes and exhausted RAM
+# (the starved workers then stalled the whole render). SerialParam keeps every GSEA
+# call inside this single R process: predictable, low memory, and no worker
+# processes to spawn or hang. It is modestly slower but reliable on 16 GB machines.
+if (requireNamespace("BiocParallel", quietly = TRUE)) {
+  BiocParallel::register(BiocParallel::SerialParam())
+}
+
+set.seed(params$seed)
+
+protocol_font_family <- "Segoe UI"
+if (.Platform$OS.type == "windows") {
+  try(
+    do.call(
+      grDevices::windowsFonts,
+      stats::setNames(
+        list(grDevices::windowsFont(protocol_font_family)),
+        protocol_font_family
+      )
+    ),
+    silent = TRUE
+  )
+}
+
+ggplot2::theme_set(ggplot2::theme_minimal(base_family = protocol_font_family))
+```
+
+## Setup paths
+
+```{r}
+#| label: setup-paths
+#| message: false
+#| warning: false
+
+resolve_project_root <- function(project_root_param) {
+  root <- project_root_param
+  if (is.null(root) || length(root) == 0 || is.na(root[[1]])) {
+    root <- "."
+  }
+  root <- trimws(as.character(root[[1]]))
+
+  if (!nzchar(root) || identical(root, ".")) {
+    if (requireNamespace("here", quietly = TRUE)) {
+      return(fs::path_abs(here::here()))
+    }
+    return(fs::path_abs("."))
+  }
+
+  fs::path_abs(fs::path_expand(root))
+}
+
+project_root <- resolve_project_root(params$project_root)
+root_via_here <- if (requireNamespace("here", quietly = TRUE)) {
+  fs::path_abs(here::here())
+} else {
+  fs::path_abs(".")
+}
+
+path_proj <- function(...) {
+  if (identical(project_root, root_via_here) && requireNamespace("here", quietly = TRUE)) {
+    return(fs::path_norm(here::here(...)))
+  }
+  fs::path_norm(fs::path(project_root, ...))
+}
+
+dir_data <- path_proj(params$dir_data)
+dir_src <- path_proj(params$dir_src)
+path_utilities_path <- fs::path(dir_src, "pathUtilities.R")
+if (!file.exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+
+de_5a_preferred <- path_proj(
+  params$dir_outputs,
+  params$de_calc_stage,
+  params$de_calc_results_dir,
+  params$de_calc_results_subdir
+)
+de_5a_legacy <- path_proj(
+  params$dir_outputs,
+  params$de_calc_stage,
+  params$de_calc_results_dir,
+  "differential_expression"
+)
+de_5a_dir <- protocol_resolve_input_dir(
+  de_5a_preferred,
+  de_5a_legacy,
+  label = "Stage 5 differential-expression result directory"
+)
+
+out_base <- path_proj(params$dir_outputs, params$out_stage)
+out_results <- fs::path(out_base, params$out_results)
+out_tables <- fs::path(out_base, params$out_tables)
+out_figures <- fs::path(out_base, params$out_figures)
+out_results_enrichment <- fs::path(out_results, params$enrichment_output_subdir)
+out_figures_enrichment <- fs::path(out_figures, params$enrichment_output_subdir)
+out_figures_comparison <- fs::path(out_figures_enrichment, params$comparison_output_subdir)
+
+stage7_path_audit <- protocol_path_audit(
+  c(
+    "Stage 5 DE input" = de_5a_dir,
+    "Enrichment result directory" = out_results_enrichment,
+    "Deepest comparison output" = fs::path(out_figures_comparison, "plot_00000000.png")
+  ),
+  portable_path_limit
+)
+protocol_assert_audit(stage7_path_audit, portable_path_limit)
+knitr::kable(stage7_path_audit, caption = "Stage 7 path-portability audit")
+
+purrr::walk(
+  c(out_results_enrichment, out_tables, out_figures_enrichment, out_figures_comparison),
+  fs::dir_create,
+  recurse = TRUE
+)
+
+message(sprintf("Using project root: %s", project_root))
+message(sprintf("Reading stage 5 DE outputs from: %s", de_5a_dir))
+message(sprintf("Writing functional-enrichment outputs to: %s", out_base))
+```
+
+## Helper functions
+
+```{r}
+#| label: helper-functions
+
+as_character_vector <- function(x) {
+  if (is.null(x) || length(x) == 0) {
+    return(character())
+  }
+  out <- unlist(x, use.names = FALSE)
+  out <- as.character(out)
+  out[!is.na(out) & nzchar(out)]
+}
+
+as_logical_scalar <- function(x, default = FALSE) {
+  if (is.null(x) || length(x) == 0 || is.na(x[[1]])) {
+    return(default)
+  }
+  if (is.logical(x)) {
+    return(isTRUE(x[[1]]))
+  }
+  value <- tolower(trimws(as.character(x[[1]])))
+  if (value %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (value %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+
+sanitize_file_name <- function(x) {
+  x %>%
+    stringr::str_replace_all("[^A-Za-z0-9_.-]+", "_") %>%
+    stringr::str_replace_all("_+", "_") %>%
+    stringr::str_replace_all("^_|_$", "")
+}
+
+resolve_input_file <- function(file_name) {
+  if (is.null(file_name) || !nzchar(as.character(file_name))) {
+    return("")
+  }
+  file_name <- as.character(file_name)
+  if (fs::is_absolute_path(file_name)) {
+    return(fs::path_norm(file_name))
+  }
+
+  candidates <- c(
+    fs::path(dir_src, file_name),
+    fs::path(dir_data, file_name),
+    path_proj(file_name)
+  )
+
+  hit <- candidates[file.exists(candidates)][1]
+  if (length(hit) == 0 || is.na(hit)) {
+    return(fs::path_norm(fs::path(dir_src, file_name)))
+  }
+
+  fs::path_norm(hit)
+}
+
+format_config_value <- function(x, empty = "<not configured>") {
+  if (is.null(x) || length(x) == 0) {
+    return(empty)
+  }
+  x <- unlist(x, use.names = FALSE)
+  x <- as.character(x)
+  x <- x[!is.na(x) & nzchar(x)]
+  if (length(x) == 0) {
+    return(empty)
+  }
+  paste(x, collapse = ", ")
+}
+
+protocol_datatable <- function(tbl,
+                               caption,
+                               page_length = 10,
+                               scroll_y = NULL,
+                               filter = "none") {
+  options <- list(
+    scrollX = TRUE,
+    pageLength = page_length,
+    autoWidth = FALSE,
+    scrollCollapse = TRUE,
+    dom = "lfrtip",
+    columnDefs = list(
+      list(className = "dt-left", targets = "_all"),
+      list(width = "12rem", targets = "_all")
+    )
+  )
+  if (!is.null(scroll_y)) {
+    options$scrollY <- scroll_y
+  }
+
+  DT::datatable(
+    tbl,
+    rownames = FALSE,
+    filter = filter,
+    class = "compact stripe hover cell-border nowrap",
+    options = options,
+    caption = htmltools::tags$caption(
+      style = "caption-side: top; text-align: left; font-family: 'Segoe UI', Arial, sans-serif;",
+      caption
+    )
+  )
+}
+
+emit_markdown <- function(text) {
+  text <- as.character(text)
+  if (!stringr::str_detect(text, "\n$")) {
+    text <- paste0(text, "\n")
+  }
+  cat(text)
+  invisible(text)
+}
+
+.stage7_figure_counter <- 0L
+
+numbered_figure_caption <- function(caption) {
+  caption <- stringr::str_squish(as.character(caption))
+  if (stringr::str_detect(caption, "^Figure\\s+\\d+\\.")) {
+    return(caption)
+  }
+  .stage7_figure_counter <<- .stage7_figure_counter + 1L
+  glue::glue("Figure {.stage7_figure_counter}. {caption}")
+}
+
+first_display_image <- function(output_file) {
+  files <- as.character(unname(output_file))
+  files <- files[!is.na(files) & nzchar(files)]
+  image_files <- files[stringr::str_detect(tolower(files), "\\.(png|jpe?g|svg)$")]
+  if (length(image_files) == 0) {
+    return(NA_character_)
+  }
+  image_files[[1]]
+}
+
+display_saved_figure <- function(output_file, caption) {
+  image_file <- first_display_image(output_file)
+  if (is.na(image_file) || !file.exists(image_file)) {
+    return(invisible(FALSE))
+  }
+
+  image_src <- fs::path_abs(image_file)
+  image_src <- gsub("\\\\", "/", image_src)
+  caption <- numbered_figure_caption(caption)
+  emit_markdown(glue::glue("\n\n![{caption}](<{image_src}>)\n\n"))
+  invisible(TRUE)
+}
+
+wrap_plot_label <- function(x, width = 24, max_chars = 70) {
+  x <- stringr::str_squish(as.character(x))
+  x <- stringr::str_trunc(x, width = max_chars, side = "right")
+  stringr::str_wrap(x, width = width)
+}
+
+# Categorical colour palette for this stage's figures. Matches the Okabe-Ito
+# sequence in protocol_categorical_colours() (src/utilityFunctions.R) so the
+# accessible colour system stays consistent across the pipeline:
+# categorical -> Okabe-Ito, sequential -> viridis option "C", divergent ->
+# Okabe-Ito blue <-> vermillion.
+stage7_okabe_ito <- c(
+  "#E69F00", "#56B4E9", "#009E73", "#0072B2",
+  "#D55E00", "#CC79A7", "#F0E442", "#999999"
+)
+stage7_discrete_palette <- function(levels) {
+  levels <- unique(as.character(levels))
+  levels <- levels[!is.na(levels) & nzchar(levels)]
+  if (length(levels) == 0) return(character())
+  cols <- if (length(levels) <= length(stage7_okabe_ito)) {
+    stage7_okabe_ito[seq_along(levels)]
+  } else {
+    grDevices::colorRampPalette(stage7_okabe_ito)(length(levels))
+  }
+  stats::setNames(cols, levels)
+}
+
+normalise_gmt_collection_records <- function(x) {
+  if (is.null(x) || length(x) == 0) {
+    return(list())
+  }
+  if (is.list(x) && !is.null(x$value)) {
+    return(normalise_gmt_collection_records(x$value))
+  }
+  if (is.list(x) && (!is.null(x$collection_name) || !is.null(x$gmt_file))) {
+    return(list(x))
+  }
+  if (is.list(x)) {
+    return(x)
+  }
+  list()
+}
+
+strip_term_prefixes <- function(term, prefixes) {
+  out <- as.character(term)
+  prefixes <- as_character_vector(prefixes)
+  for (prefix in prefixes) {
+    out <- ifelse(startsWith(out, prefix), substring(out, nchar(prefix) + 1L), out)
+  }
+  out
+}
+
+standardise_de_table <- function(tbl) {
+  if (is.null(tbl) || !is.data.frame(tbl)) {
+    return(NULL)
+  }
+
+  out <- as.data.frame(tbl)
+  if ("rowname" %in% names(out) && !"gene" %in% names(out)) {
+    names(out)[names(out) == "rowname"] <- "gene"
+  }
+  if ("Gene" %in% names(out) && !"gene" %in% names(out)) {
+    names(out)[names(out) == "Gene"] <- "gene"
+  }
+  if ("symbol" %in% names(out) && !"gene" %in% names(out)) {
+    names(out)[names(out) == "symbol"] <- "gene"
+  }
+  if (!"gene" %in% names(out)) {
+    out <- tibble::rownames_to_column(out, var = "gene")
+  }
+
+  if ("log2FC" %in% names(out) && !"logFC" %in% names(out)) {
+    names(out)[names(out) == "log2FC"] <- "logFC"
+  }
+  if ("adjp" %in% names(out) && !"adj.P.Val" %in% names(out)) {
+    names(out)[names(out) == "adjp"] <- "adj.P.Val"
+  }
+  if ("pvalue" %in% names(out) && !"P.Value" %in% names(out)) {
+    names(out)[names(out) == "pvalue"] <- "P.Value"
+  }
+  if (!"P.Value" %in% names(out) && "adj.P.Val" %in% names(out)) {
+    # The GSEA ranking metric is signed -log10(unadjusted P). If only an adjusted
+    # p-value is available, fall back to it but warn: rankings (and therefore
+    # enrichment results) will differ from the documented method.
+    warning(
+      "DE result table has no raw 'P.Value' column; using 'adj.P.Val' for the GSEA ranking metric. ",
+      "Ranking magnitude is intended to come from the unadjusted p-value, so enrichment results ",
+      "for this table may differ from the documented method. Provide a raw 'P.Value' column to avoid this.",
+      call. = FALSE
+    )
+    out$P.Value <- out$adj.P.Val
+  }
+
+  out %>%
+    dplyr::mutate(
+      gene = as.character(.data$gene),
+      logFC = if ("logFC" %in% names(out)) suppressWarnings(as.numeric(.data$logFC)) else NA_real_,
+      adj.P.Val = if ("adj.P.Val" %in% names(out)) suppressWarnings(as.numeric(.data$adj.P.Val)) else NA_real_,
+      P.Value = if ("P.Value" %in% names(out)) suppressWarnings(as.numeric(.data$P.Value)) else NA_real_
+    ) %>%
+    dplyr::filter(!is.na(.data$gene), nzchar(.data$gene))
+}
+
+build_ranked_gene_vector <- function(tbl) {
+  clean_tbl <- standardise_de_table(tbl)
+  if (is.null(clean_tbl)) {
+    return(NULL)
+  }
+
+  required_cols <- c("gene", "logFC", "P.Value")
+  if (!all(required_cols %in% names(clean_tbl))) {
+    return(NULL)
+  }
+
+  if (!identical(params$ranking_metric, "signed_neg_log10_p")) {
+    stop(
+      glue::glue("Unsupported ranking_metric '{params$ranking_metric}'. The protocol default and current supported value is 'signed_neg_log10_p'."),
+      call. = FALSE
+    )
+  }
+
+  ranked_tbl <- clean_tbl %>%
+    dplyr::filter(
+      !is.na(.data$gene),
+      is.finite(.data$logFC),
+      is.finite(.data$P.Value)
+    ) %>%
+    dplyr::mutate(
+      rank_metric = -log10(pmax(.data$P.Value, .Machine$double.xmin)) * sign(.data$logFC)
+    ) %>%
+    dplyr::filter(is.finite(.data$rank_metric)) %>%
+    dplyr::group_by(.data$gene) %>%
+    dplyr::slice_max(order_by = abs(.data$rank_metric), n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(dplyr::desc(.data$rank_metric))
+
+  values <- ranked_tbl$rank_metric
+  names(values) <- ranked_tbl$gene
+  sort(values, decreasing = TRUE)
+}
+
+run_gmt_gsea <- function(ranked_lists, gmt_tbl, method_name, collection_name) {
+  if (length(ranked_lists) == 0) {
+    return(NULL)
+  }
+
+  tryCatch(
+    suppressWarnings(
+      clusterProfiler::compareCluster(
+        geneCluster = ranked_lists,
+        fun = clusterProfiler::GSEA,
+        exponent = 1,
+        minGSSize = params$min_gene_set_size,
+        maxGSSize = params$max_gene_set_size,
+        pvalueCutoff = params$gsea_pvalue_cutoff,
+        pAdjustMethod = params$p_adjust_method,
+        TERM2GENE = gmt_tbl,
+        by = "fgsea",
+        eps = params$fgsea_eps,
+        seed = TRUE,
+        verbose = FALSE
+      )
+    ),
+    error = function(e) {
+      message(glue::glue("{collection_name} GSEA failed for {method_name}: {conditionMessage(e)}"))
+      NULL
+    }
+  )
+}
+
+run_go_gsea <- function(ranked_lists, method_name) {
+  if (length(ranked_lists) == 0) {
+    return(NULL)
+  }
+
+  if (!requireNamespace(params$go_orgdb_package, quietly = TRUE)) {
+    stop(
+      glue::glue(
+        "GO enrichment requires annotation package '{params$go_orgdb_package}', ",
+        "but it is not installed. Install the package or set run_go: false and use GMT collections only."
+      ),
+      call. = FALSE
+    )
+  }
+
+  orgdb <- get(params$go_orgdb_package, envir = asNamespace(params$go_orgdb_package))
+
+  tryCatch(
+    suppressWarnings(
+      clusterProfiler::compareCluster(
+        geneCluster = ranked_lists,
+        fun = clusterProfiler::gseGO,
+        OrgDb = orgdb,
+        keyType = params$gene_id_type,
+        ont = params$go_ontology,
+        minGSSize = params$min_gene_set_size,
+        maxGSSize = params$max_gene_set_size,
+        pvalueCutoff = params$gsea_pvalue_cutoff,
+        pAdjustMethod = params$p_adjust_method,
+        eps = params$fgsea_eps,
+        seed = TRUE,
+        verbose = FALSE
+      )
+    ),
+    error = function(e) {
+      message(glue::glue("GO GSEA failed for {method_name}: {conditionMessage(e)}"))
+      NULL
+    }
+  )
+}
+
+empty_enrichment_table <- function() {
+  tibble::tibble(
+    method_name = character(),
+    collection = character(),
+    contrast = character(),
+    ID = character(),
+    Description = character(),
+    setSize = integer(),
+    enrichmentScore = numeric(),
+    NES = numeric(),
+    pvalue = numeric(),
+    p.adjust = numeric(),
+    qvalue = numeric()
+  )
+}
+
+enrichment_to_table <- function(enrichment_obj, method_name, collection_name) {
+  if (is.null(enrichment_obj)) {
+    return(empty_enrichment_table())
+  }
+
+  tbl <- as.data.frame(enrichment_obj) %>%
+    tibble::as_tibble()
+
+  if (nrow(tbl) == 0) {
+    return(empty_enrichment_table())
+  }
+
+  tbl %>%
+    dplyr::mutate(
+      method_name = method_name,
+      collection = collection_name,
+      contrast = if ("Cluster" %in% names(.)) as.character(.data$Cluster) else NA_character_
+    ) %>%
+    dplyr::relocate(dplyr::all_of(c("method_name", "collection", "contrast")))
+}
+
+save_enrichment_outputs <- function(enrichment_obj, enrichment_tbl, method_name, collection_name) {
+  method_stub <- sanitize_file_name(method_name)
+  collection_stub <- sanitize_file_name(collection_name)
+  result_dir <- protocol_safe_directory(
+    out_results_enrichment,
+    collection_stub,
+    path_limit = portable_path_limit
+  )
+  figure_dir <- protocol_safe_directory(
+    out_figures_enrichment,
+    collection_stub,
+    path_limit = portable_path_limit
+  )
+  figure_record <- tibble::tibble(
+    method_name = character(),
+    collection = character(),
+    output_png = character()
+  )
+  fs::dir_create(result_dir, recurse = TRUE)
+  fs::dir_create(figure_dir, recurse = TRUE)
+
+  result_rds_path <- protocol_output_path(
+    result_dir,
+    paste0(method_stub, "_", collection_stub, "_gsea.rds"),
+    portable_path_limit
+  )
+  result_csv_path <- protocol_output_path(
+    result_dir,
+    paste0(method_stub, "_", collection_stub, "_gsea.csv"),
+    portable_path_limit
+  )
+  saveRDS(enrichment_obj, result_rds_path)
+  readr::write_csv(enrichment_tbl, result_csv_path)
+
+  if (!is.null(enrichment_obj) && nrow(enrichment_tbl) > 0) {
+    plot_contrast_count <- max(1L, dplyr::n_distinct(enrichment_tbl$contrast))
+    plot_term_count <- dplyr::n_distinct(enrichment_tbl$Description)
+    visible_term_count <- min(
+      plot_term_count,
+      params$dotplot_show_category * plot_contrast_count
+    )
+    dotplot_width <- max(as.numeric(params$fig_width_wide), as.numeric(params$fig_width_standard), na.rm = TRUE)
+    dotplot_height <- max(
+      as.numeric(params$fig_height_standard),
+      min(16, 4 + 0.22 * visible_term_count + 0.15 * plot_contrast_count),
+      na.rm = TRUE
+    )
+
+    p <- suppressWarnings(
+      clusterProfiler::dotplot(
+        enrichment_obj,
+        showCategory = params$dotplot_show_category,
+        color = "p.adjust"
+      )
+    ) +
+      ggplot2::labs(
+        title = glue::glue("{collection_name} GSEA: {method_name}"),
+        subtitle = "Lower adjusted P-values indicate stronger pathway-level evidence for the ranked DE contrast list."
+      ) +
+      ggplot2::scale_x_discrete(labels = function(x) wrap_plot_label(x, width = 16, max_chars = 58)) +
+      ggplot2::scale_y_discrete(labels = function(x) wrap_plot_label(x, width = 34, max_chars = 90)) +
+      # Sequential magnitude (adjusted P-value) -> accessible viridis option "C".
+      # direction = -1 puts the most significant (smallest p.adjust) terms at the
+      # bright end so they stand out, consistent with the -log10(FDR) heatmaps.
+      ggplot2::scale_color_viridis_c(option = "C", direction = -1, name = "adjusted P-value") +
+      # clusterProfiler::dotplot maps p.adjust to the FILL aesthetic for
+      # compareClusterResult objects and to COLOUR for single results, so set both
+      # to the accessible plasma ramp; the scale for the unused aesthetic is a
+      # harmless no-op. Without the fill scale, the enrichplot default red/blue leaks.
+      ggplot2::scale_fill_viridis_c(option = "C", direction = -1, name = "adjusted P-value") +
+      ggplot2::theme_minimal(base_size = 10, base_family = protocol_font_family) +
+      ggplot2::theme(
+        text = ggplot2::element_text(family = protocol_font_family),
+        plot.title = ggplot2::element_text(size = 10, face = "bold"),
+        plot.subtitle = ggplot2::element_text(size = 8.5),
+        axis.title = ggplot2::element_text(size = 11),
+        axis.text.x = ggplot2::element_text(size = 7.5, angle = 45, hjust = 1, vjust = 1, lineheight = 0.9),
+        axis.text.y = ggplot2::element_text(size = 7.5, lineheight = 0.9),
+        legend.title = ggplot2::element_text(size = 7),
+        legend.text = ggplot2::element_text(size = 6),
+        panel.grid.major.y = ggplot2::element_line(linewidth = 0.2, colour = "#E5E5E5"),
+        plot.margin = ggplot2::margin(t = 8, r = 12, b = 18, l = 12)
+      )
+
+    figure_path <- protocol_output_path(
+      figure_dir,
+      paste0(method_stub, "_", collection_stub, "_dotplot.png"),
+      portable_path_limit
+    )
+    ggplot2::ggsave(
+      filename = figure_path,
+      plot = p,
+      width = dotplot_width,
+      height = dotplot_height,
+      dpi = 300,
+      bg = "white",
+      limitsize = FALSE
+    )
+
+    figure_record <- tibble::tibble(
+      method_name = method_name,
+      collection = collection_name,
+      output_png = as.character(figure_path)
+    )
+  } else {
+    message(glue::glue("No {collection_name} enrichment dotplot exported for {method_name}: no terms passed the configured threshold."))
+  }
+  figure_record
+}
+```
+
+```{r}
+#| label: run-parameter-summary
+#| results: asis
+#| warning: false
+
+gmt_collection_records <- normalise_gmt_collection_records(params$gmt_collections)
+enabled_gmt_collection_records <- purrr::keep(gmt_collection_records, function(entry) {
+  as_logical_scalar(entry$enabled, default = TRUE)
+})
+
+selected_de_methods <- as_character_vector(params$selected_de_methods)
+selected_contrasts_requested <- as_character_vector(params$selected_contrasts)
+contrast_selection_mode <- if (length(selected_contrasts_requested) == 0) {
+  "All contrasts available for each selected method"
+} else {
+  "Exact contrast list supplied in YAML"
+}
+
+run_parameter_summary <- tibble::tribble(
+  ~parameter, ~value,
+  "Project root", format_config_value(project_root),
+  "Stage 5 DE result directory", format_config_value(de_5a_dir),
+  "7 output directory", format_config_value(out_base),
+  "Selected DE methods", format_config_value(selected_de_methods),
+  "Contrast selection mode", contrast_selection_mode,
+  "GO enabled", as.character(isTRUE(params$run_go)),
+  "GO ontology", format_config_value(params$go_ontology),
+  "GO annotation package", format_config_value(params$go_orgdb_package),
+  "GMT collections enabled", as.character(length(enabled_gmt_collection_records)),
+  "Ranking metric", format_config_value(params$ranking_metric),
+  "GSEA adjusted P-value cutoff", format_config_value(params$gsea_pvalue_cutoff),
+  "Minimum gene set size", format_config_value(params$min_gene_set_size),
+  "Maximum gene set size", format_config_value(params$max_gene_set_size, empty = "<no upper limit>")
+)
+
+protocol_datatable(
+  run_parameter_summary,
+  caption = "Functional-enrichment settings used for this render",
+  page_length = nrow(run_parameter_summary)
+)
+```
+
+## Load selected DE methods and contrasts
+
+This section uses the DE statistics saved by stage 5. It loads the selected stage 5 method result objects, reports the available contrasts, and then resolves the contrasts that will enter GSEA.
+
+::: {.callout-tip}
+## Contrast selection
+Leave `selected_contrasts` blank for the standard protocol path. The notebook will use every contrast available in each selected method object. Provide exact contrast names only when you need a smaller focused enrichment run.
+:::
+
+```{r}
+#| label: load-selected-de-results
+#| warning: false
+
+method_file_map <- c(
+  dream_GeoDiffCounts = "dream_results.RDS",
+  limma_voom_TMM = "limma_voom_TMM_results.RDS",
+  limma_voom_GeoDiff = "limma_voom_GeoDiff_results.RDS",
+  limma_trend_Q3 = "limma_trend_Q3_results.RDS",
+  limma_trend_GeoDiff = "limma_trend_GeoDiff_results.RDS"
+)
+
+is_geodiff_method <- function(method_name) {
+  method_name %in% c("dream_GeoDiffCounts", "limma_voom_GeoDiff", "limma_trend_GeoDiff")
+}
+
+method_inventory <- tibble::tibble(
+  method_name = names(method_file_map),
+  file_name = unname(method_file_map),
+  file_path = fs::path(de_5a_dir, unname(method_file_map))
+) %>%
+  dplyr::mutate(file_exists = file.exists(.data$file_path))
+
+readr::write_csv(method_inventory, fs::path(out_tables, "method_availability_from_5a.csv"))
+
+if (length(selected_de_methods) == 0) {
+  protocol_datatable(method_inventory, caption = "Available stage 5 DE method result files")
+  stop("params$selected_de_methods is blank. Select at least one stage 5 method before rendering functional enrichment.", call. = FALSE)
+}
+
+unknown_methods <- setdiff(selected_de_methods, names(method_file_map))
+if (length(unknown_methods) > 0) {
+  protocol_datatable(method_inventory, caption = "Available stage 5 DE method result files")
+  stop(glue::glue("Unknown selected_de_methods: {paste(unknown_methods, collapse = ', ')}."), call. = FALSE)
+}
+
+missing_method_files <- selected_de_methods[!file.exists(fs::path(de_5a_dir, method_file_map[selected_de_methods]))]
+if (length(missing_method_files) > 0) {
+  geodiff_guidance <- if (any(is_geodiff_method(missing_method_files))) {
+    " The selected method requires GeoDiff-filtered count data or GeoDiff-normalized outputs, but the required GeoDiff outputs were not found. If GeoDiff was intentionally skipped, select an available non-GeoDiff method such as limma_trend_Q3 or limma_voom_TMM."
+  } else {
+    ""
+  }
+  protocol_datatable(method_inventory, caption = "Available stage 5 DE method result files")
+  stop(
+    glue::glue(
+      "Selected method file(s) were not found for: {paste(missing_method_files, collapse = ', ')}. ",
+      "Check project_root, de_calc_stage, de_calc_results_dir, and whether stage 5 was run for the selected methods.",
+      "{geodiff_guidance}"
+    ),
+    call. = FALSE
+  )
+}
+
+method_results <- purrr::set_names(vector("list", length(selected_de_methods)), selected_de_methods)
+for (method_name in selected_de_methods) {
+  method_results[[method_name]] <- readRDS(fs::path(de_5a_dir, method_file_map[[method_name]]))
+}
+
+contrast_inventory <- purrr::imap_dfr(method_results, function(contrast_list, method_name) {
+  tibble::tibble(
+    method_name = method_name,
+    contrast = names(contrast_list),
+    n_genes = purrr::map_int(contrast_list, nrow)
+  )
+})
+
+readr::write_csv(contrast_inventory, fs::path(out_tables, "available_method_contrast_inventory.csv"))
+
+protocol_datatable(
+  contrast_inventory,
+  caption = "Available contrasts in the selected stage 5 method result objects",
+  page_length = 15,
+  scroll_y = "420px"
+)
+
+if (length(selected_contrasts_requested) > 0) {
+  missing_contrasts <- contrast_inventory %>%
+    dplyr::filter(.data$method_name %in% selected_de_methods) %>%
+    dplyr::group_by(.data$method_name) %>%
+    dplyr::summarise(missing = list(setdiff(selected_contrasts_requested, .data$contrast)), .groups = "drop") %>%
+    tidyr::unnest(cols = "missing")
+
+  if (nrow(missing_contrasts) > 0) {
+    readr::write_csv(missing_contrasts, fs::path(out_tables, "missing_requested_contrasts.csv"))
+    stop(
+      glue::glue("Some selected_contrasts were not found. First missing pair: {missing_contrasts$method_name[[1]]} / {missing_contrasts$missing[[1]]}."),
+      call. = FALSE
+    )
+  }
+
+  method_results <- purrr::map(method_results, ~ .x[selected_contrasts_requested])
+} else {
+  message("selected_contrasts is blank; using all contrasts available for each selected method.")
+}
+
+selected_method_contrast_inventory <- purrr::imap_dfr(method_results, function(contrast_list, method_name) {
+  tibble::tibble(
+    method_name = method_name,
+    contrast = names(contrast_list),
+    n_genes = purrr::map_int(contrast_list, nrow)
+  )
+})
+
+readr::write_csv(selected_method_contrast_inventory, fs::path(out_tables, "selected_method_contrast_inventory.csv"))
+
+protocol_datatable(
+  selected_method_contrast_inventory,
+  caption = "Selected method/contrast combinations entering functional enrichment",
+  page_length = min(15, max(1, nrow(selected_method_contrast_inventory))),
+  scroll_y = "420px"
+)
+```
+
+## Load GMT collections
+
+GO is run from `org.Hs.eg.db` and does not need an external gene set file. Hallmark, Reactome, and any additional user-supplied collections are loaded from GMT files declared in `gmt_collections`.
+
+::: {.callout-note}
+## Adding another collection
+To add another GMT source, place the GMT file in `src/` or `data/` and add a new `gmt_collections` record in the YAML. The notebook will use the same generic GSEA workflow and output structure for every enabled GMT collection.
+:::
+
+::: {.callout-caution}
+## Reactome file requirement
+Reactome is included in the default enrichment set. If `src/c2.cp.reactome.v2026.1.Hs.symbols.gmt` is not present in the configured project `src/` directory, provide the GMT file or set the Reactome YAML entry to `enabled: false` before rendering.
+:::
+
+```{r}
+#| label: load-gmt-collections
+#| warning: false
+
+gmt_collection_tbl <- purrr::imap_dfr(gmt_collection_records, function(entry, i) {
+  collection_name <- if (!is.null(entry$collection_name)) as.character(entry$collection_name[[1]]) else ""
+  gmt_file <- if (!is.null(entry$gmt_file)) as.character(entry$gmt_file[[1]]) else ""
+
+  tibble::tibble(
+    collection_name = ifelse(nzchar(collection_name), collection_name, paste0("GMT_", i)),
+    gmt_file = gmt_file,
+    term_prefix_to_strip = paste(as_character_vector(entry$term_prefix_to_strip), collapse = ";"),
+    enabled = as_logical_scalar(entry$enabled, default = TRUE),
+    resolved_path = ifelse(nzchar(gmt_file), resolve_input_file(gmt_file), "")
+  )
+})
+
+if (nrow(gmt_collection_tbl) == 0) {
+  gmt_collection_tbl <- tibble::tibble(
+    collection_name = character(),
+    gmt_file = character(),
+    term_prefix_to_strip = character(),
+    enabled = logical(),
+    resolved_path = character()
+  )
+}
+
+readr::write_csv(gmt_collection_tbl, fs::path(out_tables, "configured_gmt_collections.csv"))
+
+enabled_gmt_collection_tbl <- gmt_collection_tbl %>%
+  dplyr::filter(.data$enabled)
+
+if (!isTRUE(params$run_go) && nrow(enabled_gmt_collection_tbl) == 0) {
+  protocol_datatable(gmt_collection_tbl, caption = "Configured GMT collections for this render")
+  stop("GO is disabled and no enabled GMT collections were configured. Enable run_go or at least one GMT collection before rendering notebook 7.", call. = FALSE)
+}
+
+gmt_collections <- list()
+if (nrow(enabled_gmt_collection_tbl) > 0) {
+  for (i in seq_len(nrow(enabled_gmt_collection_tbl))) {
+    collection_name <- enabled_gmt_collection_tbl$collection_name[[i]]
+    gmt_path <- enabled_gmt_collection_tbl$resolved_path[[i]]
+    prefixes <- stringr::str_split(enabled_gmt_collection_tbl$term_prefix_to_strip[[i]], ";", simplify = FALSE)[[1]]
+    prefixes <- prefixes[nzchar(prefixes)]
+
+    if (!file.exists(gmt_path)) {
+      protocol_datatable(gmt_collection_tbl, caption = "Configured GMT collections for this render")
+      stop(glue::glue("GMT collection '{collection_name}' is enabled, but its file was not found at: {gmt_path}"), call. = FALSE)
+    }
+
+    gmt_tbl <- clusterProfiler::read.gmt(gmt_path) %>%
+      dplyr::mutate(
+        term = strip_term_prefixes(.data$term, prefixes),
+        gene = as.character(.data$gene)
+      )
+
+    gmt_collections[[collection_name]] <- gmt_tbl
+  }
+}
+
+gmt_loaded_summary <- purrr::imap_dfr(gmt_collections, function(gmt_tbl, collection_name) {
+  tibble::tibble(
+    collection_name = collection_name,
+    gene_sets = dplyr::n_distinct(gmt_tbl$term),
+    gene_links = nrow(gmt_tbl)
+  )
+})
+
+if (nrow(gmt_loaded_summary) == 0) {
+  message("No enabled GMT collections were loaded.")
+} else {
+  readr::write_csv(gmt_loaded_summary, fs::path(out_tables, "loaded_gmt_collection_summary.csv"))
+}
+
+protocol_datatable(
+  gmt_collection_tbl,
+  caption = "Configured GMT collections for this render",
+  page_length = 10
+)
+
+protocol_datatable(
+  gmt_loaded_summary,
+  caption = "Loaded GMT collection summary",
+  page_length = min(10, max(1, nrow(gmt_loaded_summary)))
+)
+```
+
+## Prepare ranked gene lists
+
+Each method/contrast result table is converted into a named numeric vector for GSEA. Genes are ranked by signed `-log10(P.Value)`, so the direction comes from log fold-change and the magnitude comes from the unadjusted DE P-value.
+
+```{r}
+#| label: prepare-ranked-gene-lists
+
+ranked_gene_lists <- purrr::imap(method_results, function(contrast_list, method_name) {
+  ranked_for_method <- purrr::imap(contrast_list, function(tbl, contrast_name) {
+    ranked <- build_ranked_gene_vector(tbl)
+    if (is.null(ranked) || length(ranked) < params$min_gene_set_size) {
+      warning(glue::glue("Ranked gene list for {method_name} / {contrast_name} is empty or too small."))
+      return(NULL)
+    }
+    ranked
+  })
+  ranked_for_method[!vapply(ranked_for_method, is.null, logical(1))]
+})
+
+ranked_gene_lists <- ranked_gene_lists[purrr::map_int(ranked_gene_lists, length) > 0]
+
+ranked_summary <- purrr::imap_dfr(ranked_gene_lists, function(contrast_lists, method_name) {
+  purrr::imap_dfr(contrast_lists, function(ranked, contrast_name) {
+    tibble::tibble(
+      method_name = method_name,
+      contrast = contrast_name,
+      ranked_genes = length(ranked),
+      min_rank = min(ranked, na.rm = TRUE),
+      max_rank = max(ranked, na.rm = TRUE)
+    )
+  })
+})
+
+if (nrow(ranked_summary) == 0) {
+  stop("No ranked gene lists were available for enrichment. Check selected methods, selected contrasts, and DE result columns.", call. = FALSE)
+}
+
+readr::write_csv(ranked_summary, fs::path(out_tables, "ranked_gene_list_summary.csv"))
+
+protocol_datatable(
+  ranked_summary,
+  caption = "Ranked gene lists prepared for GSEA",
+  page_length = 15
+)
+```
+
+## Run enrichment
+
+This section runs GO GSEA when enabled and then applies the same generic GSEA workflow to each enabled GMT collection.
+
+```{r}
+#| label: run-enrichment
+#| fig-width: 13
+#| fig-height: 9
+#| warning: false
+
+enrichment_tables <- list()
+enrichment_objects <- list()
+enrichment_figure_records <- list()
+
+# GSEA result objects (Reactome especially) are large. Holding every method x
+# collection object in memory at once can exhaust RAM on 16 GB machines, and the
+# OS then kills R partway through the run with no R-level error. Each object is
+# already written to its own RDS inside save_enrichment_outputs(), so here we
+# save it, build its dotplot, then free it and reclaim memory before the next
+# collection. The combined object bundle is rebuilt from those per-collection RDS
+# files after the loop, keeping peak memory to roughly one GSEA result at a time.
+for (method_name in names(ranked_gene_lists)) {
+  ranked_lists <- ranked_gene_lists[[method_name]]
+
+  if (isTRUE(params$run_go)) {
+    go_obj <- run_go_gsea(ranked_lists, method_name = method_name)
+    go_tbl <- enrichment_to_table(go_obj, method_name = method_name, collection_name = "GO")
+    enrichment_tables[[paste(method_name, "GO", sep = "__")]] <- go_tbl
+    enrichment_figure_records[[paste(method_name, "GO", sep = "__")]] <- save_enrichment_outputs(
+      go_obj, go_tbl, method_name, "GO"
+    )
+    rm(go_obj)
+    invisible(gc(FALSE))
+  } else {
+    message("GO enrichment is disabled.")
+  }
+
+  if (length(gmt_collections) > 0) {
+    for (collection_name in names(gmt_collections)) {
+      gmt_obj <- run_gmt_gsea(
+        ranked_lists = ranked_lists,
+        gmt_tbl = gmt_collections[[collection_name]],
+        method_name = method_name,
+        collection_name = collection_name
+      )
+      gmt_tbl <- enrichment_to_table(gmt_obj, method_name = method_name, collection_name = collection_name)
+      enrichment_tables[[paste(method_name, collection_name, sep = "__")]] <- gmt_tbl
+      enrichment_figure_records[[paste(method_name, collection_name, sep = "__")]] <- save_enrichment_outputs(
+        gmt_obj, gmt_tbl, method_name, collection_name
+      )
+      rm(gmt_obj)
+      invisible(gc(FALSE))
+    }
+  }
+}
+
+combined_enrichment <- dplyr::bind_rows(enrichment_tables)
+
+if (nrow(combined_enrichment) == 0) {
+  message("No enrichment terms passed the configured threshold. Output files will contain empty summary tables.")
+  combined_enrichment <- empty_enrichment_table()
+}
+
+# Rebuild the combined object bundle from the per-collection RDS files written
+# during the loop, so this convenience output is preserved without keeping every
+# GSEA result in memory at the same time.
+enrichment_object_files <- fs::dir_ls(
+  out_results_enrichment, recurse = TRUE, type = "file", regexp = "_gsea\\.rds$"
+)
+enrichment_objects <- stats::setNames(
+  lapply(enrichment_object_files, readRDS),
+  fs::path_ext_remove(fs::path_file(enrichment_object_files))
+)
+saveRDS(enrichment_objects, fs::path(out_results_enrichment, "selected_methods_enrichment_objects.rds"))
+rm(enrichment_objects)
+invisible(gc(FALSE))
+readr::write_csv(combined_enrichment, fs::path(out_results_enrichment, "combined_enrichment_long.csv"))
+
+protocol_datatable(
+  combined_enrichment,
+  caption = "Combined enrichment table across selected methods, contrasts, and collections",
+  page_length = 15,
+  scroll_y = "420px"
+)
+```
+
+## Enrichment dotplots
+
+These dotplots summarize the strongest pathway-level results for each selected differential-expression method and gene-set collection. Use the external captions with the exported result tables to identify terms that require biological review.
+
+```{r}
+#| label: enrichment-dotplots
+#| results: asis
+#| message: false
+#| warning: false
+
+enrichment_figure_inventory <- dplyr::bind_rows(enrichment_figure_records)
+
+if (nrow(enrichment_figure_inventory) == 0) {
+  emit_markdown("::: {.callout-note}\nNo enrichment dotplots were generated because no terms passed the configured threshold.\n:::\n")
+} else {
+  for (figure_index in seq_len(nrow(enrichment_figure_inventory))) {
+    figure_row <- enrichment_figure_inventory[figure_index, , drop = FALSE]
+    display_saved_figure(
+      figure_row$output_png,
+      glue::glue(
+        "Gene-set enrichment dotplot for {figure_row$collection} using {figure_row$method_name}. ",
+        "Dot color reports the adjusted P-value; lower values indicate stronger pathway-level evidence. ",
+        "Compare enriched terms across the displayed contrasts and review full labels in the exported tables."
+      )
+    )
+  }
+}
+```
+
+## Enrichment summary
+
+The summary table below is the main place to check the pathway-level results. Use it to see whether enrichment is concentrated in a small number of contrasts, a single method, or a specific collection.
+
+```{r}
+#| label: enrichment-summary
+
+if (nrow(combined_enrichment) == 0) {
+  enrichment_summary <- tibble::tibble(
+    method_name = character(),
+    collection = character(),
+    contrast = character(),
+    n_terms = integer(),
+    n_fdr_0_05 = integer(),
+    min_p_adjust = numeric(),
+    max_abs_nes = numeric()
+  )
+} else {
+  enrichment_summary <- combined_enrichment %>%
+    dplyr::group_by(.data$method_name, .data$collection, .data$contrast) %>%
+    dplyr::summarise(
+      n_terms = dplyr::n(),
+      n_fdr_0_05 = sum(.data$p.adjust < 0.05, na.rm = TRUE),
+      min_p_adjust = suppressWarnings(min(.data$p.adjust, na.rm = TRUE)),
+      max_abs_nes = suppressWarnings(max(abs(.data$NES), na.rm = TRUE)),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      min_p_adjust = dplyr::if_else(is.infinite(.data$min_p_adjust), NA_real_, .data$min_p_adjust),
+      max_abs_nes = dplyr::if_else(is.infinite(.data$max_abs_nes), NA_real_, .data$max_abs_nes)
+    )
+}
+
+readr::write_csv(enrichment_summary, fs::path(out_tables, "enrichment_summary_by_method_contrast.csv"))
+
+protocol_datatable(
+  enrichment_summary,
+  caption = "Enrichment summary by method, collection, and contrast",
+  page_length = 15
+)
+```
+
+::: {.callout-important}
+## Decision checkpoint
+Review the ranked-gene audit, enrichment tables, and dotplots before interpreting pathway results. Strong pathway signal should be assessed alongside the DE model evidence and gene-level checks from `6_Differential_Expression_Visualisation.qmd`.
+:::
+
+## Conditional pathway-level method comparison
+
+::: {.callout-note}
+## When this section matters
+This section is most useful when more than one DE method was selected. It compares enrichment significance profiles across methods so users can judge whether pathway results depend on method choice. It does not replace human review of model assumptions.
+:::
+
+```{r}
+#| label: pathway-method-comparison
+
+# Initialize optional figure objects so the display chunks below can be
+# evaluated safely when the multi-method comparison is not available.
+p_distribution <- NULL
+p_min_fdr <- NULL
+p_corr <- NULL
+
+if (length(selected_de_methods) >= 2 && nrow(combined_enrichment) > 0 && all(c("ID", "p.adjust") %in% names(combined_enrichment))) {
+  comparison_input <- combined_enrichment %>%
+    dplyr::filter(is.finite(.data$p.adjust))
+
+  readr::write_csv(comparison_input, fs::path(out_tables, "pathway_method_comparison_input.csv"))
+
+  if (nrow(comparison_input) > 0) {
+    p_distribution <- comparison_input %>%
+      dplyr::mutate(
+        neg_log10_fdr = -log10(pmax(.data$p.adjust, .Machine$double.xmin))
+      ) %>%
+      ggplot(aes(x = .data$neg_log10_fdr, color = .data$method_name, fill = .data$method_name)) +
+      geom_histogram(alpha = 0.25, bins = 30, position = "identity") +
+      facet_wrap(~collection, scales = "free_y") +
+      # Categorical (DE method) -> accessible Okabe-Ito palette.
+      scale_color_manual(values = stage7_discrete_palette(sort(unique(comparison_input$method_name)))) +
+      scale_fill_manual(values = stage7_discrete_palette(sort(unique(comparison_input$method_name)))) +
+      labs(
+        title = "Distribution of pathway adjusted P-values by DE method",
+        x = "-log10(adjusted P-value)",
+        y = "Pathway count",
+        color = "DE method",
+        fill = "DE method"
+      ) +
+      theme_minimal(base_size = 11, base_family = protocol_font_family) +
+      theme(
+        text = element_text(family = protocol_font_family),
+        plot.title = element_text(size = 11, face = "bold"),
+        axis.title = element_text(size = 9),
+        axis.text = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 7)
+      )
+
+    ggplot2::ggsave(
+      filename = fs::path(out_figures_comparison, "pathway_fdr_distribution_by_method.png"),
+      plot = p_distribution,
+      width = params$fig_width_wide,
+      height = params$fig_height_standard,
+      dpi = 300,
+      bg = "white"
+    )
+  }
+
+  if (nrow(enrichment_summary) > 0 && any(is.finite(enrichment_summary$min_p_adjust))) {
+    p_min_fdr <- enrichment_summary %>%
+      dplyr::mutate(minus_log10_min_fdr = -log10(pmax(.data$min_p_adjust, .Machine$double.xmin))) %>%
+      ggplot(aes(x = .data$contrast, y = .data$method_name, fill = .data$minus_log10_min_fdr)) +
+      geom_tile(color = "white", linewidth = 0.2) +
+      facet_wrap(~collection) +
+      scale_fill_viridis_c(option = "C", na.value = "grey90") +
+      labs(
+        title = "Minimum pathway FDR by method and contrast",
+        x = "Contrast",
+        y = "DE method",
+        fill = "-log10(min FDR)"
+      ) +
+      scale_x_discrete(labels = function(x) wrap_plot_label(x, width = 16, max_chars = 58)) +
+      theme_minimal(base_size = 10, base_family = protocol_font_family) +
+      theme(
+        text = element_text(family = protocol_font_family),
+        plot.title = element_text(size = 10, face = "bold"),
+        axis.title = element_text(size = 8),
+        axis.text.x = element_text(size = 5.5, angle = 45, hjust = 1, vjust = 1, lineheight = 0.9),
+        axis.text.y = element_text(size = 7),
+        legend.title = element_text(size = 7),
+        legend.text = element_text(size = 6)
+      )
+
+    ggplot2::ggsave(
+      filename = fs::path(out_figures_comparison, "minimum_pathway_fdr_by_method_contrast.png"),
+      plot = p_min_fdr,
+      width = params$fig_width_wide,
+      height = params$fig_height_wide,
+      dpi = 300,
+      bg = "white"
+    )
+  }
+
+  comparison_scores <- comparison_input %>%
+    dplyr::mutate(
+      pathway_key = paste(.data$collection, .data$contrast, .data$ID, sep = "__"),
+      pathway_score = if ("NES" %in% names(.)) {
+        -log10(pmax(.data$p.adjust, .Machine$double.xmin)) * sign(.data$NES)
+      } else {
+        -log10(pmax(.data$p.adjust, .Machine$double.xmin))
+      }
+    ) %>%
+    dplyr::select(pathway_key, method_name, pathway_score) %>%
+    tidyr::pivot_wider(names_from = method_name, values_from = pathway_score)
+
+  score_mat <- comparison_scores %>%
+    dplyr::select(-dplyr::all_of("pathway_key")) %>%
+    as.data.frame()
+
+  keep_cols <- names(score_mat)[vapply(score_mat, function(x) sum(is.finite(x)) >= 2 && stats::sd(x, na.rm = TRUE) > 0, logical(1))]
+  score_mat <- score_mat[, keep_cols, drop = FALSE]
+
+  if (ncol(score_mat) >= 2) {
+    pathway_corr <- suppressWarnings(stats::cor(score_mat, use = "pairwise.complete.obs"))
+    pathway_corr[!is.finite(pathway_corr)] <- NA_real_
+
+    readr::write_csv(
+      as.data.frame(pathway_corr) %>% tibble::rownames_to_column("method_name"),
+      fs::path(out_tables, "pathway_method_correlation_matrix.csv")
+    )
+
+    pathway_corr_long <- as.data.frame(as.table(pathway_corr)) %>%
+      dplyr::rename(x = Var1, y = Var2, correlation = Freq)
+
+    p_corr <- ggplot(pathway_corr_long, aes(x = .data$x, y = .data$y, fill = .data$correlation)) +
+      geom_tile(color = "white", linewidth = 0.2) +
+      geom_text(aes(label = ifelse(is.na(.data$correlation), "", sprintf("%.2f", .data$correlation))), size = 3) +
+      # Correlation is genuinely bidirectional, so a divergent scale is correct here.
+      # Accessible Okabe-Ito blue -> near-white -> vermillion (matches
+      # protocol_divergent_palette() in src/utilityFunctions.R).
+      scale_fill_gradient2(low = "#0072B2", mid = "#F7F7F7", high = "#D55E00", midpoint = 0, limits = c(-1, 1), na.value = "grey90") +
+      coord_equal() +
+      labs(
+        title = "Pathway-level method correlation",
+        x = NULL,
+        y = NULL,
+        fill = "r"
+      ) +
+      scale_x_discrete(labels = function(x) wrap_plot_label(x, width = 14, max_chars = 50)) +
+      scale_y_discrete(labels = function(x) wrap_plot_label(x, width = 14, max_chars = 50)) +
+      theme_minimal(base_size = 10, base_family = protocol_font_family) +
+      theme(
+        text = element_text(family = protocol_font_family),
+        plot.title = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(size = 7, angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 7),
+        legend.title = element_text(size = 7),
+        legend.text = element_text(size = 6),
+        panel.grid = element_blank()
+      )
+
+    ggplot2::ggsave(
+      filename = fs::path(out_figures_comparison, "pathway_method_correlation.png"),
+      plot = p_corr,
+      width = params$fig_width_standard,
+      height = params$fig_height_standard,
+      dpi = 300,
+      bg = "white"
+    )
+  } else {
+    message("Skipping pathway-level method correlation: insufficient overlapping pathway scores across methods.")
+  }
+} else {
+  message("Skipping pathway-level method comparison because fewer than two methods were selected or enrichment results are empty.")
+}
+```
+
+```{r}
+#| label: fig-pathway-fdr-distribution
+#| results: asis
+#| message: false
+#| warning: false
+
+if (exists("p_distribution") && !is.null(p_distribution)) {
+  display_saved_figure(
+    fs::path(out_figures_comparison, "pathway_fdr_distribution_by_method.png"),
+    "Distribution of pathway adjusted P values across selected differential-expression methods, faceted by gene-set collection. Larger values on the horizontal axis indicate stronger pathway-level evidence. Compare the method-specific distributions to identify shifts that warrant review."
+  )
+}
+```
+
+```{r}
+#| label: fig-minimum-pathway-fdr
+#| results: asis
+#| message: false
+#| warning: false
+
+if (exists("p_min_fdr") && !is.null(p_min_fdr)) {
+  display_saved_figure(
+    fs::path(out_figures_comparison, "minimum_pathway_fdr_by_method_contrast.png"),
+    "Minimum pathway false discovery rate for each selected differential-expression method and contrast, faceted by gene-set collection. Higher values indicate stronger enrichment evidence. Review isolated method-specific signals before drawing biological conclusions."
+  )
+}
+```
+
+```{r}
+#| label: fig-pathway-method-correlation
+#| results: asis
+#| message: false
+#| warning: false
+
+if (exists("p_corr") && !is.null(p_corr)) {
+  display_saved_figure(
+    fs::path(out_figures_comparison, "pathway_method_correlation.png"),
+    "Pairwise correlation of pathway-level scores between selected differential-expression methods. Values near 1 indicate concordant direction and significance, whereas lower or negative values indicate method-sensitive results that should be reported."
+  )
+}
+```
+
+::: {.callout-important}
+## Decision checkpoint
+If pathway-level summaries differ strongly across selected DE methods, report that the pathway results depend on the DE method. Use this evidence with the method-overlap, correlation, and selected-method outputs from `6_Differential_Expression_Visualisation.qmd` before making biological conclusions.
+:::
+
+## Output list
+
+```{r}
+#| label: output-list
+
+output_list_files <- c(
+  list.files(out_results, recursive = TRUE, full.names = TRUE),
+  list.files(out_tables, recursive = TRUE, full.names = TRUE),
+  list.files(out_figures, recursive = TRUE, full.names = TRUE)
+)
+
+output_list <- tibble::tibble(path = unique(output_list_files)) %>%
+  dplyr::filter(file.exists(.data$path)) %>%
+  dplyr::mutate(relative_path = fs::path_rel(.data$path, start = project_root)) %>%
+  dplyr::arrange(.data$relative_path)
+
+readr::write_csv(output_list, fs::path(out_tables, "stage7_output_list.csv"))
+
+protocol_datatable(
+  output_list,
+  caption = "7 functional enrichment output list",
+  page_length = 15,
+  scroll_y = "420px"
+)
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

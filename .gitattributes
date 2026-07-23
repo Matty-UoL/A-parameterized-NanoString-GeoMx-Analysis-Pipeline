@@ -1,0 +1,9 @@
+*.qmd linguist-language=RMarkdown
+*.RData binary
+*.rds binary
+*.RDS binary
+*.zip binary
+*.gz binary
+*.xlsx binary
+*.pkc binary
+*.jpg binary

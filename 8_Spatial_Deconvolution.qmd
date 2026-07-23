@@ -1,0 +1,1858 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "Spatial Deconvolution"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+    include-in-header:
+      text: |
+        <style>
+        :root {
+          --bs-body-font-family: "Segoe UI", Arial, sans-serif;
+          --bs-font-sans-serif: "Segoe UI", Arial, sans-serif;
+          --bs-code-font-family: "Segoe UI", Arial, sans-serif;
+          --bs-font-monospace: "Segoe UI", Arial, sans-serif;
+        }
+
+        html,
+        body,
+        .quarto-container,
+        .quarto-container *,
+        .quarto-title-block,
+        .quarto-title-block *,
+        main,
+        main *,
+        .callout,
+        .callout *,
+        #TOC,
+        #TOC *,
+        .navbar,
+        .navbar *,
+        table,
+        table *,
+        .dataTables_wrapper,
+        .dataTables_wrapper *,
+        pre,
+        pre *,
+        code,
+        code *,
+        .sourceCode,
+        .sourceCode *,
+        .cell-output,
+        .cell-output *,
+        .cell-output-display,
+        .cell-output-display * {
+          font-family: "Segoe UI", Arial, sans-serif !important;
+        }
+        </style>
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+
+params:
+
+  # Project paths and shared folders
+  #
+  # project_root is the analysis project root that contains Outputs.
+  # Use "." only when rendering from the same project folder that contains the
+  # Outputs directory from earlier stages. If the notebooks live in a separate code
+  # repository, set this to the project folder where stage 3 wrote its outputs.
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+  dir_outputs: "Outputs"
+  dir_src: "src"
+  dir_data: "Data"
+
+  # Normalization stage read by this notebook
+  #
+  # SpatialDecon requires a normalized expression assay and the raw count assay.
+  # The default below uses the Q3-normalized object and q_norm assay because
+  # this route most closely follows the SpatialDecon GeoMx vignette. It is the
+  # recommended default for this deconvolution stage.
+  #
+  # GeoDiff alternative:
+  #   norm_object_file: "GeoDiff_normalised_spatial_data.RDS"
+  #   norm_assay: "normmat"
+  #
+  # GeoDiff is optional for Stage 8. If GeoDiff was intentionally skipped in
+  # earlier stages, keep the Q3 defaults below. Only switch to the GeoDiff
+  # alternative when Outputs/3_Norm/results/GeoDiff_normalised_spatial_data.RDS
+  # exists and the GeoDiff normmat assay is the specific route you want to test.
+  # The GeoDiff normmat route is retained for consistency checks with the wider
+  # pipeline, but it may trigger singular-system failures during the
+  # SpatialDecon fit for some datasets.
+  norm_stage: "3_Norm"
+  norm_results_dir: "results"
+  norm_object_file: "normalised_spatial_data.RDS"
+  norm_assay: "q_norm"
+  raw_assay: "exprs"
+
+  # This stage output structure
+  out_stage: "8_Deconvolution"
+  out_results: "results"
+  out_tables: "tables"
+  out_figures: "figures"
+  decon_output_subdir: "decon"
+
+  # Reference matrix controls
+  #
+  # This workflow is intentionally general. Pancreas_HCA is the worked-example
+  # default for the exemplar pancreatic dataset, not a pipeline requirement.
+  # Before rendering with a new dataset, choose a reference matrix that matches
+  # the tissue, species, age group, disease context, and expected cell-type
+  # coverage of the study.
+  #
+  # The default configuration points to Pancreas_HCA.RData from the NanoString
+  # CellProfileLibrary. Download the relevant .RData reference matrix from:
+  # https://github.com/Nanostring-Biostats/CellProfileLibrary/tree/master/Human/Adult
+  # and place it in the configured Data reference folder. With the default path
+  # parameters below, Pancreas_HCA.RData is resolved from:
+  # <project_root>/Data/Spatial_Deconvolution_References/Pancreas_HCA.RData
+  #
+  # Supported reference_source values:
+  #   - "cell_profile_library": download a matrix supported by
+  #     SpatialDecon::download_profile_matrix(), cache it locally, and reuse the
+  #     cached RData file on later renders.
+  #   - "local_file": load a user-supplied RDS, RData, CSV, or TSV matrix from
+  #     reference_file. Local matrices pass through the same audit checks as
+  #     downloaded matrices.
+  #   - "spatialdecon_builtin": load a package-bundled matrix such as safeTME.
+  reference_source: "local_file"
+  reference_species: "Human"
+  reference_age_group: "Adult"
+  reference_matrix_name: "Pancreas_HCA"
+  reference_file: "Pancreas_HCA.RData"
+  reference_cache_dir: "Spatial_Deconvolution_References"
+  reference_cache_file: ""
+  overwrite_reference_cache: false
+  reference_download_timeout_sec: 600
+  spatialdecon_builtin_reference: "safeTME"
+  transpose_reference: false
+
+  # Reference/data compatibility checks
+  #
+  # The notebook reports gene overlap before fitting. Low overlap usually means
+  # that the selected reference is biologically or technically unsuitable, or
+  # that a local reference matrix is transposed or uses non-matching gene IDs.
+  min_reference_gene_overlap: 25
+  stop_on_low_gene_overlap: true
+
+  # Heatmap and table controls
+  #
+  # metadata_context_columns are carried into output tables when present. They
+  # help users interpret whether estimated cell-type composition is plausible
+  # for segments, tissue regions, patients, or slides.
+  metadata_context_columns:
+    value: ["segment", "cell_type", "disease_status", "patient_id", "slide_name"]
+
+  # heatmap_annotation_columns are drawn as top annotation bars on the
+  # SpatialDecon beta and proportion heatmaps when the columns are present in
+  # the GeoMx sample metadata. Keep these categorical and biologically
+  # interpretable so the heatmap can be read against segment, staining, tissue,
+  # disease, slide, or patient context.
+  heatmap_annotation_columns:
+    value: ["segment", "cell_type", "disease_status", "slide_name"]
+
+  # Optional stable color overrides for known annotation levels. Empty by default
+  # so heatmap annotation bars use the shared Okabe-Ito accessible palette,
+  # consistent with the categorical colours used elsewhere in the pipeline. Any
+  # annotation level not listed here receives a deterministic Okabe-Ito colour.
+  # To pin specific levels, add Okabe-Ito hex values rather than editing plotting
+  # code, for example:
+  #   segment:
+  #     PanCK: "#009E73"
+  #     Stroma: "#56B4E9"
+  heatmap_annotation_color_overrides:
+    value: {}
+  reference_heatmap_max_genes: 500
+  show_heatmap_sample_labels: false
+
+  # Figure controls
+  seed: 123
+  fig_width_standard: 11
+  fig_height_standard: 8
+  fig_width_wide: 13
+  fig_height_wide: 8
+  figure_dpi: 300
+---
+
+# Spatial deconvolution (8)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook estimates cell-type abundance from a normalized GeoMx object using [`SpatialDecon`](https://bioconductor.org/packages/release/bioc/html/SpatialDecon.html). It is an optional interpretation step: use the heatmaps and tables to check whether inferred cell-type composition is plausible for the selected tissue, segment strategy, and reference matrix.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+::: {.callout-important}
+## Required user decision
+Select an appropriate reference matrix before rendering. The default `Pancreas_HCA` matrix is provided only as the worked example for the exemplar pancreatic dataset. For another tissue or disease context, change the reference settings in the YAML rather than editing code.
+:::
+
+::: {.callout-caution collapse="true"}
+## Scope of this stage
+This first version of the protocol runs basic SpatialDecon and produces check tables plus heatmaps. Treat any analysis beyond the reference checks and heatmaps as a separate protocol decision that needs its own checks.
+:::
+
+::: {.callout-note collapse="true"}
+## YAML parameter guide (8)
+The editable YAML is organized around the decisions a protocol user should make before deconvolution:
+
+1. Normalized object and assay choice.
+2. Reference matrix source and caching behavior.
+3. Reference provenance, cell-type inventory, and gene-overlap checks.
+4. Metadata columns and figure dimensions.
+:::
+
+::: {.callout-important}
+## Reference resources
+The selected reference matrix is controlled by `reference_source`, `reference_matrix_name`, `reference_file`, and `reference_cache_dir` in the YAML. The default configuration uses `Pancreas_HCA.RData` from the [NanoString CellProfileLibrary Human/Adult directory](https://github.com/Nanostring-Biostats/CellProfileLibrary/tree/master/Human/Adult); with the default path settings, place the configured reference file at `<project_root>/Data/Spatial_Deconvolution_References/Pancreas_HCA.RData`. The same `Spatial_Deconvolution_References` folder is used to cache CellProfileLibrary downloads when `reference_source: "cell_profile_library"` is selected.
+
+Users analyzing another tissue should download or provide a reference matrix that matches their tissue, species, age group, disease context, and expected cell-type coverage. The optional `cell_profile_library` route can still call `SpatialDecon::download_profile_matrix()`, but a local reference file is more reproducible and avoids render failures when GitHub downloads are unavailable.
+:::
+
+## Load libraries
+
+```{r}
+#| label: load-libraries
+#| output: false
+#| warning: false
+#| message: false
+
+required_packages <- c(
+  "tidyverse",
+  "fs",
+  "glue",
+  "knitr",
+  "DT",
+  "ggplot2",
+  "scales",
+  "ComplexHeatmap",
+  "circlize",
+  "grid",
+  "Biobase",
+  "GeomxTools",
+  "SpatialDecon"
+)
+
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  stop(
+    sprintf(
+      paste(
+        "Install the following packages before rendering stage 8: %s.",
+        "SpatialDecon and GeomxTools are Bioconductor packages and are not installed by this notebook."
+      ),
+      paste(missing_packages, collapse = ", ")
+    ),
+    call. = FALSE
+  )
+}
+
+library(tidyverse)
+library(fs)
+library(glue)
+library(knitr)
+library(DT)
+library(ggplot2)
+library(scales)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+library(Biobase)
+library(GeomxTools)
+library(SpatialDecon)
+
+set.seed(params$seed)
+# Suppress the benign knitr/xfun::attr() table-rendering deprecation warnings (and
+# other incidental rendering warnings) across this terminal stage. Substantive
+# issues are surfaced via explicit messages and stop() calls, not warnings.
+knitr::opts_chunk$set(warning = FALSE)
+protocol_plot_font_family <- "sans"
+ggplot2::theme_set(ggplot2::theme_minimal(base_family = protocol_plot_font_family))
+```
+
+## Setup paths
+
+```{r}
+#| label: setup-paths
+#| message: false
+#| warning: false
+
+resolve_project_root <- function(project_root_param) {
+  root <- project_root_param
+  if (is.null(root) || length(root) == 0 || is.na(root[[1]])) {
+    root <- "."
+  }
+  root <- trimws(as.character(root[[1]]))
+
+  if (!nzchar(root) || identical(root, ".")) {
+    if (requireNamespace("here", quietly = TRUE)) {
+      return(fs::path_abs(here::here()))
+    }
+    return(fs::path_abs("."))
+  }
+
+  fs::path_abs(fs::path_expand(root))
+}
+
+project_root <- resolve_project_root(params$project_root)
+root_via_here <- if (requireNamespace("here", quietly = TRUE)) {
+  fs::path_abs(here::here())
+} else {
+  fs::path_abs(".")
+}
+
+path_proj <- function(...) {
+  if (identical(project_root, root_via_here) && requireNamespace("here", quietly = TRUE)) {
+    return(fs::path_norm(here::here(...)))
+  }
+  fs::path_norm(fs::path(project_root, ...))
+}
+
+resolve_project_file <- function(file_name, search_dirs = NULL) {
+  if (is.null(file_name) || length(file_name) == 0 || is.na(file_name[[1]])) {
+    return("")
+  }
+
+  file_name <- trimws(as.character(file_name[[1]]))
+  if (!nzchar(file_name)) {
+    return("")
+  }
+
+  expanded <- fs::path_expand(file_name)
+  if (fs::is_absolute_path(expanded)) {
+    return(fs::path_norm(expanded))
+  }
+
+  candidates <- fs::path(c(project_root, search_dirs), expanded)
+  hit <- candidates[file.exists(candidates)][1]
+  if (!is.na(hit)) {
+    return(fs::path_norm(hit))
+  }
+
+  fs::path_norm(fs::path(project_root, expanded))
+}
+
+dir_data <- path_proj(params$dir_data)
+dir_src <- path_proj(params$dir_src)
+path_utilities_path <- fs::path(dir_src, "pathUtilities.R")
+if (!file.exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+
+norm_input_path <- path_proj(
+  params$dir_outputs,
+  params$norm_stage,
+  params$norm_results_dir,
+  params$norm_object_file
+)
+
+q3_norm_input_path <- path_proj(
+  params$dir_outputs,
+  params$norm_stage,
+  params$norm_results_dir,
+  "normalised_spatial_data.RDS"
+)
+
+geodiff_norm_input_path <- path_proj(
+  params$dir_outputs,
+  params$norm_stage,
+  params$norm_results_dir,
+  "GeoDiff_normalised_spatial_data.RDS"
+)
+
+selected_norm_is_geodiff <- identical(params$norm_object_file, "GeoDiff_normalised_spatial_data.RDS") ||
+  identical(params$norm_assay, "normmat")
+
+out_base <- path_proj(params$dir_outputs, params$out_stage)
+out_results <- fs::path(out_base, params$out_results)
+out_tables <- fs::path(out_base, params$out_tables)
+out_figures <- fs::path(out_base, params$out_figures)
+out_results_decon <- fs::path(out_results, params$decon_output_subdir)
+out_figures_decon <- fs::path(out_figures, params$decon_output_subdir)
+
+reference_cache_dir <- if (fs::is_absolute_path(fs::path_expand(params$reference_cache_dir))) {
+  fs::path_norm(fs::path_expand(params$reference_cache_dir))
+} else {
+  fs::path_norm(fs::path(dir_data, params$reference_cache_dir))
+}
+decon_rds_path <- protocol_contract_path(
+  out_results_decon,
+  "stage8_spatialdecon_object.rds",
+  portable_path_limit,
+  "Stage 8 SpatialDecon result"
+)
+stage8_path_audit <- protocol_path_audit(
+  c(
+    "Stage 3 normalized input" = norm_input_path,
+    "Reference cache directory" = reference_cache_dir,
+    "Stage 8 result object" = decon_rds_path,
+    "Stage 8 figure directory" = out_figures_decon
+  ),
+  portable_path_limit
+)
+protocol_assert_audit(stage8_path_audit, portable_path_limit)
+knitr::kable(stage8_path_audit, caption = "Stage 8 path-portability audit")
+
+purrr::walk(
+  c(out_results_decon, out_tables, out_figures_decon, reference_cache_dir),
+  fs::dir_create,
+  recurse = TRUE
+)
+
+message(sprintf("Using project root: %s", project_root))
+message(sprintf("Reading normalized GeoMx object from: %s", norm_input_path))
+message(sprintf("Writing spatial-deconvolution outputs to: %s", out_base))
+message(sprintf("Reference cache directory: %s", reference_cache_dir))
+```
+
+## Helper functions
+
+```{r}
+#| label: helper-functions
+
+as_character_vector <- function(x) {
+  if (is.null(x) || length(x) == 0) {
+    return(character())
+  }
+  out <- unlist(x, use.names = FALSE)
+  out <- as.character(out)
+  out[!is.na(out) & nzchar(out)]
+}
+
+as_logical_scalar <- function(x, default = FALSE) {
+  if (is.null(x) || length(x) == 0 || is.na(x[[1]])) {
+    return(default)
+  }
+  if (is.logical(x)) {
+    return(isTRUE(x[[1]]))
+  }
+  val <- tolower(trimws(as.character(x[[1]])))
+  if (val %in% c("true", "t", "1", "yes", "y")) {
+    return(TRUE)
+  }
+  if (val %in% c("false", "f", "0", "no", "n")) {
+    return(FALSE)
+  }
+  default
+}
+
+as_integer_scalar <- function(x, default) {
+  if (is.null(x) || length(x) == 0 || is.na(x[[1]])) {
+    return(default)
+  }
+  out <- suppressWarnings(as.integer(x[[1]]))
+  if (is.na(out)) default else out
+}
+
+sanitize_stub <- function(x) {
+  x <- gsub("[^A-Za-z0-9]+", "_", as.character(x))
+  x <- gsub("^_+|_+$", "", x)
+  if (!nzchar(x)) "reference" else x
+}
+
+protocol_kable <- function(...) {
+  # Build the table inside suppressWarnings() and emit it as a plain string via
+  # asis_output() (the pattern used in stages 1 and 2). Materialising the table to
+  # character strips the knitr_kable class, so the print method -- the source of
+  # the benign xfun::attr() deprecation warnings -- never runs at display time,
+  # which a withCallingHandlers wrapper around kable() alone could not prevent.
+  table_text <- suppressWarnings(as.character(knitr::kable(...)))
+  knitr::asis_output(paste(table_text, collapse = "\n"))
+}
+
+extract_reference_matrix <- function(object, source_label) {
+  if (is.matrix(object)) {
+    return(object)
+  }
+
+  if (is.data.frame(object)) {
+    return(as.matrix(object))
+  }
+
+  if (is.list(object)) {
+    candidate_names <- c("profile_matrix", "profile.matrix", "matrix", "reference", "X")
+    hit <- candidate_names[candidate_names %in% names(object)][1]
+    if (!is.na(hit)) {
+      return(extract_reference_matrix(object[[hit]], source_label))
+    }
+  }
+
+  stop(
+    sprintf(
+      "Could not identify a reference matrix in %s. Provide a matrix, data frame, or list containing profile_matrix.",
+      source_label
+    ),
+    call. = FALSE
+  )
+}
+
+coerce_table_to_matrix <- function(tbl, source_label) {
+  df <- as.data.frame(tbl, check.names = FALSE)
+
+  if (ncol(df) < 2) {
+    stop(sprintf("Reference table %s must contain genes plus at least one cell-type column.", source_label), call. = FALSE)
+  }
+
+  first_col <- df[[1]]
+  other_cols <- df[-1]
+  other_numeric <- vapply(other_cols, function(col) {
+    all(!is.na(suppressWarnings(as.numeric(col))[!is.na(col)]))
+  }, logical(1))
+
+  if (!is.numeric(first_col) && all(other_numeric)) {
+    gene_ids <- as.character(first_col)
+    df <- other_cols
+    rownames(df) <- gene_ids
+  }
+
+  mat <- as.matrix(df)
+  suppressWarnings(storage.mode(mat) <- "numeric")
+
+  if (anyNA(mat) && !anyNA(df)) {
+    stop(sprintf("Reference table %s contains non-numeric expression columns.", source_label), call. = FALSE)
+  }
+
+  mat
+}
+
+normalise_reference_matrix <- function(mat, transpose_reference = FALSE) {
+  if (is.data.frame(mat)) {
+    mat <- coerce_table_to_matrix(mat, "data frame")
+  }
+
+  if (!is.matrix(mat)) {
+    mat <- as.matrix(mat)
+  }
+
+  suppressWarnings(storage.mode(mat) <- "numeric")
+
+  if (is.null(rownames(mat)) || any(!nzchar(rownames(mat)))) {
+    stop("Reference matrix must have gene identifiers as row names.", call. = FALSE)
+  }
+  if (is.null(colnames(mat)) || any(!nzchar(colnames(mat)))) {
+    stop("Reference matrix must have cell-type names as column names.", call. = FALSE)
+  }
+
+  if (isTRUE(transpose_reference)) {
+    mat <- t(mat)
+  }
+
+  mat <- mat[rownames(mat) != "" & !is.na(rownames(mat)), , drop = FALSE]
+  mat <- mat[, colnames(mat) != "" & !is.na(colnames(mat)), drop = FALSE]
+  mat <- mat[rowSums(is.na(mat)) < ncol(mat), , drop = FALSE]
+  mat[is.na(mat)] <- 0
+
+  if (anyDuplicated(rownames(mat)) > 0) {
+    mat <- rowsum(mat, group = rownames(mat), reorder = FALSE) /
+      as.numeric(table(rownames(mat))[rownames(rowsum(mat, group = rownames(mat), reorder = FALSE))])
+  }
+
+  if (nrow(mat) == 0 || ncol(mat) == 0) {
+    stop("Reference matrix is empty after validation.", call. = FALSE)
+  }
+
+  mat
+}
+
+load_rdata_reference <- function(file_path) {
+  ref_env <- new.env(parent = emptyenv())
+  loaded_names <- load(file_path, envir = ref_env)
+
+  if ("profile_matrix" %in% loaded_names) {
+    ref_matrix <- ref_env$profile_matrix
+  } else {
+    matrix_candidates <- loaded_names[vapply(loaded_names, function(name) {
+      obj <- get(name, envir = ref_env)
+      is.matrix(obj) || is.data.frame(obj)
+    }, logical(1))]
+
+    if (length(matrix_candidates) != 1) {
+      stop(
+        sprintf(
+          "RData reference %s must contain profile_matrix or exactly one matrix/data.frame object.",
+          file_path
+        ),
+        call. = FALSE
+      )
+    }
+    ref_matrix <- get(matrix_candidates[[1]], envir = ref_env)
+  }
+
+  list(
+    matrix = ref_matrix,
+    cell_groups = if ("cellGroups" %in% loaded_names) ref_env$cellGroups else NULL,
+    metadata = if ("metadata" %in% loaded_names) ref_env$metadata else NULL,
+    loaded_names = loaded_names
+  )
+}
+
+load_reference_file <- function(file_path) {
+  if (!file.exists(file_path)) {
+    stop(sprintf("Reference file not found: %s", file_path), call. = FALSE)
+  }
+
+  ext <- tolower(fs::path_ext(file_path))
+
+  if (ext %in% c("rdata", "rda")) {
+    return(load_rdata_reference(file_path))
+  }
+
+  if (ext == "rds") {
+    obj <- readRDS(file_path)
+    return(list(matrix = extract_reference_matrix(obj, file_path), cell_groups = NULL, metadata = NULL, loaded_names = "readRDS"))
+  }
+
+  if (ext == "csv") {
+    tbl <- readr::read_csv(file_path, show_col_types = FALSE)
+    return(list(matrix = coerce_table_to_matrix(tbl, file_path), cell_groups = NULL, metadata = NULL, loaded_names = "csv"))
+  }
+
+  if (ext %in% c("tsv", "txt")) {
+    tbl <- readr::read_tsv(file_path, show_col_types = FALSE)
+    return(list(matrix = coerce_table_to_matrix(tbl, file_path), cell_groups = NULL, metadata = NULL, loaded_names = "tsv"))
+  }
+
+  stop(
+    sprintf("Unsupported reference file extension '%s'. Use RDS, RData, CSV, or TSV.", ext),
+    call. = FALSE
+  )
+}
+
+default_cache_file <- function(reference_matrix_name) {
+  paste0(sanitize_stub(reference_matrix_name), ".RData")
+}
+
+download_or_load_cell_profile_reference <- function() {
+  cache_file <- params$reference_cache_file
+  if (is.null(cache_file) || length(cache_file) == 0 || !nzchar(trimws(as.character(cache_file[[1]])))) {
+    cache_file <- default_cache_file(params$reference_matrix_name)
+  } else {
+    cache_file <- as.character(cache_file[[1]])
+  }
+
+  cache_path <- protocol_output_path(
+    reference_cache_dir,
+    cache_file,
+    portable_path_limit
+  )
+  overwrite_cache <- as_logical_scalar(params$overwrite_reference_cache, default = FALSE)
+
+  if (file.exists(cache_path) && !overwrite_cache) {
+    loaded <- load_reference_file(cache_path)
+    loaded$cache_path <- cache_path
+    loaded$source_detail <- "cached_cell_profile_library"
+    return(loaded)
+  }
+
+  message(
+    glue::glue(
+      "Downloading CellProfileLibrary matrix {params$reference_matrix_name} ",
+      "({params$reference_species}, {params$reference_age_group})."
+    )
+  )
+
+  old_timeout <- getOption("timeout")
+  options(timeout = max(old_timeout, as_integer_scalar(params$reference_download_timeout_sec, default = 600)))
+  on.exit(options(timeout = old_timeout), add = TRUE)
+
+  profile_matrix <- tryCatch(
+    SpatialDecon::download_profile_matrix(
+      species = params$reference_species,
+      age_group = params$reference_age_group,
+      matrixname = params$reference_matrix_name
+    ),
+    error = function(e) {
+      stop(
+        sprintf(
+          paste(
+            "Could not download CellProfileLibrary matrix '%s'.",
+            "If this is a transient network issue, rerun the notebook.",
+            "For offline or publication-stable runs, download the matching .RData file manually from",
+            "https://github.com/Nanostring-Biostats/CellProfileLibrary/tree/master,",
+            "place it in the configured source folder or data folder,",
+            "set reference_source: \"local_file\", and set reference_file to the downloaded file name or path.",
+            "Original error: %s"
+          ),
+          params$reference_matrix_name,
+          conditionMessage(e)
+        ),
+        call. = FALSE
+      )
+    }
+  )
+
+  cellGroups <- if (exists("cellGroups", envir = .GlobalEnv)) {
+    get("cellGroups", envir = .GlobalEnv)
+  } else {
+    NULL
+  }
+
+  metadata <- if (exists("metadata", envir = .GlobalEnv)) {
+    get("metadata", envir = .GlobalEnv)
+  } else {
+    NULL
+  }
+
+  save(profile_matrix, cellGroups, metadata, file = cache_path)
+
+  list(
+    matrix = profile_matrix,
+    cell_groups = cellGroups,
+    metadata = metadata,
+    loaded_names = c("profile_matrix", "cellGroups", "metadata"),
+    cache_path = cache_path,
+    source_detail = "downloaded_cell_profile_library"
+  )
+}
+
+load_spatialdecon_builtin_reference <- function() {
+  ref_name <- trimws(as.character(params$spatialdecon_builtin_reference[[1]]))
+  if (!nzchar(ref_name)) {
+    stop("spatialdecon_builtin_reference must be set when reference_source is spatialdecon_builtin.", call. = FALSE)
+  }
+
+  ref_env <- new.env(parent = emptyenv())
+  utils::data(list = ref_name, package = "SpatialDecon", envir = ref_env)
+  if (!exists(ref_name, envir = ref_env)) {
+    stop(sprintf("Could not load SpatialDecon built-in reference '%s'.", ref_name), call. = FALSE)
+  }
+
+  list(
+    matrix = get(ref_name, envir = ref_env),
+    cell_groups = NULL,
+    metadata = tibble::tibble(Profile.Matrix = ref_name, Source = "SpatialDecon package data"),
+    loaded_names = ref_name,
+    cache_path = NA_character_,
+    source_detail = "spatialdecon_builtin"
+  )
+}
+
+load_reference_matrix <- function() {
+  source <- tolower(trimws(as.character(params$reference_source[[1]])))
+
+  loaded <- switch(
+    source,
+    cell_profile_library = download_or_load_cell_profile_reference(),
+    local_file = {
+      ref_path <- resolve_project_file(params$reference_file, search_dirs = c(reference_cache_dir, dir_data, dir_src))
+      loaded <- load_reference_file(ref_path)
+      loaded$cache_path <- NA_character_
+      loaded$source_detail <- "local_file"
+      loaded$file_path <- ref_path
+      loaded
+    },
+    spatialdecon_builtin = load_spatialdecon_builtin_reference(),
+    stop(
+      sprintf(
+        "Unsupported reference_source '%s'. Use cell_profile_library, local_file, or spatialdecon_builtin.",
+        source
+      ),
+      call. = FALSE
+    )
+  )
+
+  loaded$matrix <- normalise_reference_matrix(
+    loaded$matrix,
+    transpose_reference = as_logical_scalar(params$transpose_reference, default = FALSE)
+  )
+
+  loaded$source <- source
+  loaded
+}
+
+matrix_to_long <- function(mat, value_name) {
+  mat %>%
+    as.data.frame(check.names = FALSE) %>%
+    tibble::rownames_to_column("sample_id") %>%
+    tibble::as_tibble() %>%
+    tidyr::pivot_longer(
+      cols = -sample_id,
+      names_to = "reference_cell_type",
+      values_to = value_name
+    )
+}
+
+build_wide_result_table <- function(mat, metadata_tbl) {
+  mat_tbl <- mat %>%
+    as.data.frame(check.names = FALSE) %>%
+    tibble::rownames_to_column("sample_id") %>%
+    tibble::as_tibble()
+
+  dplyr::left_join(metadata_tbl, mat_tbl, by = "sample_id")
+}
+
+safe_result_matrix <- function(object, field) {
+  value <- Biobase::pData(object)[[field]]
+  if (is.null(value) || !is.matrix(value)) {
+    return(NULL)
+  }
+  value
+}
+
+build_cell_group_lookup <- function(cell_groups) {
+  if (is.null(cell_groups)) {
+    return(tibble::tibble(reference_cell_type = character(), reference_cell_group = character()))
+  }
+
+  if (is.data.frame(cell_groups)) {
+    group_tbl <- tibble::as_tibble(cell_groups, .name_repair = "minimal")
+    if (ncol(group_tbl) < 2) {
+      return(tibble::tibble(reference_cell_type = character(), reference_cell_group = character()))
+    }
+
+    names(group_tbl)[seq_len(2)] <- c("reference_cell_group", "reference_cell_type")
+    return(group_tbl %>%
+      dplyr::transmute(
+        reference_cell_type = as.character(.data$reference_cell_type),
+        reference_cell_group = as.character(.data$reference_cell_group)
+      ) %>%
+      dplyr::filter(!is.na(.data$reference_cell_type), nzchar(.data$reference_cell_type)))
+  }
+
+  if (is.list(cell_groups)) {
+    group_names <- names(cell_groups)
+    if (is.null(group_names)) {
+      group_names <- rep(NA_character_, length(cell_groups))
+    }
+
+    return(purrr::map2_dfr(cell_groups, group_names, function(members, group_name) {
+      if (is.na(group_name) || !nzchar(group_name)) {
+        group_name <- "unlabelled_group"
+      }
+
+      tibble::tibble(
+        reference_cell_type = as.character(unlist(members, use.names = FALSE)),
+        reference_cell_group = as.character(group_name)
+      )
+    }) %>%
+      dplyr::filter(!is.na(.data$reference_cell_type), nzchar(.data$reference_cell_type)))
+  }
+
+  if (is.atomic(cell_groups) && !is.null(names(cell_groups))) {
+    return(tibble::tibble(
+      reference_cell_type = as.character(cell_groups),
+      reference_cell_group = as.character(names(cell_groups))
+    ) %>%
+      dplyr::filter(!is.na(.data$reference_cell_type), nzchar(.data$reference_cell_type)))
+  }
+
+  tibble::tibble(reference_cell_type = character(), reference_cell_group = character())
+}
+
+build_reference_cell_type_inventory <- function(reference_matrix, cell_groups = NULL) {
+  group_lookup <- build_cell_group_lookup(cell_groups) %>%
+    dplyr::group_by(.data$reference_cell_type) %>%
+    dplyr::summarise(
+      reference_cell_group = paste(unique(.data$reference_cell_group), collapse = "; "),
+      .groups = "drop"
+    )
+
+  inventory <- purrr::map_dfr(colnames(reference_matrix), function(cell_type) {
+    values <- reference_matrix[, cell_type]
+    finite_values <- values[is.finite(values)]
+    nonzero_genes <- sum(finite_values > 0, na.rm = TRUE)
+
+    tibble::tibble(
+      reference_cell_type = cell_type,
+      reference_genes = nrow(reference_matrix),
+      nonzero_genes = nonzero_genes,
+      nonzero_gene_fraction = nonzero_genes / nrow(reference_matrix),
+      mean_profile_value = mean(finite_values, na.rm = TRUE),
+      median_profile_value = stats::median(finite_values, na.rm = TRUE),
+      p95_profile_value = as.numeric(stats::quantile(finite_values, probs = 0.95, na.rm = TRUE, names = FALSE)),
+      max_profile_value = max(finite_values, na.rm = TRUE)
+    )
+  })
+
+  inventory %>%
+    dplyr::left_join(group_lookup, by = "reference_cell_type") %>%
+    dplyr::mutate(reference_cell_group = dplyr::coalesce(.data$reference_cell_group, "")) %>%
+    dplyr::select(
+      dplyr::all_of(c("reference_cell_type", "reference_cell_group")),
+      dplyr::everything()
+    ) %>%
+    dplyr::arrange(.data$reference_cell_type)
+}
+
+scale_rows_by_max <- function(mat) {
+  row_max <- apply(mat, 1, max, na.rm = TRUE)
+  keep <- is.finite(row_max) & row_max > 0
+  mat <- mat[keep, , drop = FALSE]
+  row_max <- row_max[keep]
+  sweep(mat, 1, row_max, "/")
+}
+
+select_reference_heatmap_genes <- function(mat, max_genes) {
+  if (nrow(mat) <= max_genes) {
+    return(mat)
+  }
+
+  row_sd <- apply(mat, 1, stats::sd, na.rm = TRUE)
+  row_sd[!is.finite(row_sd)] <- 0
+  selected <- names(sort(row_sd, decreasing = TRUE))[seq_len(max_genes)]
+  mat[selected, , drop = FALSE]
+}
+
+order_matrix_rows <- function(mat) {
+  if (nrow(mat) < 2) {
+    return(rownames(mat))
+  }
+  rownames(mat)[stats::hclust(stats::dist(mat))$order]
+}
+
+order_matrix_columns <- function(mat) {
+  if (ncol(mat) < 2) {
+    return(colnames(mat))
+  }
+  colnames(mat)[stats::hclust(stats::dist(t(mat)))$order]
+}
+
+plot_reference_heatmap <- function(reference_matrix, max_genes) {
+  plot_mat <- reference_matrix %>%
+    select_reference_heatmap_genes(max_genes = max_genes) %>%
+    scale_rows_by_max()
+
+  gene_order <- order_matrix_rows(plot_mat)
+  cell_order <- order_matrix_columns(plot_mat)
+
+  heatmap_tbl <- plot_mat %>%
+    as.data.frame(check.names = FALSE) %>%
+    tibble::rownames_to_column("gene") %>%
+    tibble::as_tibble() %>%
+    tidyr::pivot_longer(-gene, names_to = "cell_type", values_to = "scaled_expression") %>%
+    dplyr::mutate(
+      gene = factor(.data$gene, levels = rev(gene_order)),
+      cell_type = factor(.data$cell_type, levels = cell_order)
+    )
+
+  ggplot(heatmap_tbl, aes(x = .data$cell_type, y = .data$gene, fill = .data$scaled_expression)) +
+    geom_tile() +
+    scale_fill_viridis_c(
+      option = "C",
+      limits = c(0, 1),
+      na.value = "grey90",
+      name = "Row-scaled\nexpression"
+    ) +
+    labs(x = "Reference cell type", y = NULL) +
+    theme_minimal(base_size = 11, base_family = protocol_plot_font_family) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+      axis.text.y = element_blank(),
+      panel.grid = element_blank(),
+      legend.position = "right"
+    )
+}
+
+clean_annotation_values <- function(x) {
+  out <- trimws(as.character(x))
+  out[is.na(out) | !nzchar(out)] <- "Not recorded"
+  out
+}
+
+get_annotation_color_overrides <- function(color_overrides, annotation_name) {
+  if (is.null(color_overrides) || length(color_overrides) == 0) {
+    return(character())
+  }
+
+  annotation_overrides <- color_overrides[[annotation_name]]
+  if (is.null(annotation_overrides) || length(annotation_overrides) == 0) {
+    return(character())
+  }
+
+  out <- unlist(annotation_overrides, use.names = TRUE)
+  if (is.null(names(out)) || any(!nzchar(names(out)))) {
+    stop(
+      sprintf(
+        "heatmap_annotation_color_overrides for '%s' must be a named mapping from annotation level to color.",
+        annotation_name
+      ),
+      call. = FALSE
+    )
+  }
+
+  out <- as.character(out)
+  names(out) <- as.character(names(out))
+  out[!is.na(out) & nzchar(out) & !is.na(names(out)) & nzchar(names(out))]
+}
+
+validate_color_values <- function(colors, context_label) {
+  valid <- vapply(
+    colors,
+    function(color_value) {
+      tryCatch(
+        {
+          grDevices::col2rgb(color_value)
+          TRUE
+        },
+        error = function(e) FALSE
+      )
+    },
+    logical(1)
+  )
+
+  if (any(!valid)) {
+    stop(
+      sprintf(
+        "Invalid heatmap annotation color(s) for %s: %s.",
+        context_label,
+        paste(names(colors)[!valid], collapse = ", ")
+      ),
+      call. = FALSE
+    )
+  }
+
+  colors
+}
+
+annotation_base_palette <- function(n) {
+  # Black-reserved Okabe-Ito categorical sequence (matches protocol_categorical_colours()
+  # in src/utilityFunctions.R): black is kept for text/lines, and the lowest-contrast
+  # colours on white (yellow, grey) are placed last.
+  base_palette <- c(
+    "#E69F00", "#56B4E9", "#009E73", "#0072B2",
+    "#D55E00", "#CC79A7", "#F0E442", "#999999"
+  )
+  if (n <= length(base_palette)) {
+    return(base_palette[seq_len(n)])
+  }
+  grDevices::colorRampPalette(base_palette)(n)
+}
+
+build_annotation_palette <- function(values, annotation_name, color_overrides = NULL) {
+  annotation_levels <- sort(unique(clean_annotation_values(values)))
+  annotation_colors <- setNames(annotation_base_palette(length(annotation_levels)), annotation_levels)
+
+  override_colors <- get_annotation_color_overrides(color_overrides, annotation_name)
+  if (length(override_colors) > 0) {
+    validate_color_values(override_colors, sprintf("annotation '%s' overrides", annotation_name))
+    matched_levels <- intersect(names(override_colors), names(annotation_colors))
+    annotation_colors[matched_levels] <- override_colors[matched_levels]
+  }
+
+  validate_color_values(annotation_colors, sprintf("annotation '%s'", annotation_name))
+}
+
+build_heatmap_annotation_data <- function(metadata_tbl, sample_order, annotation_columns) {
+  annotation_columns <- intersect(annotation_columns, colnames(metadata_tbl))
+  if (length(annotation_columns) == 0) {
+    return(NULL)
+  }
+
+  annotation_tbl <- tibble::tibble(sample_id = sample_order) %>%
+    dplyr::left_join(
+      metadata_tbl %>%
+        dplyr::select(sample_id, dplyr::all_of(annotation_columns)) %>%
+        dplyr::distinct(.data$sample_id, .keep_all = TRUE),
+      by = "sample_id"
+    ) %>%
+    dplyr::mutate(dplyr::across(dplyr::all_of(annotation_columns), clean_annotation_values))
+
+  informative_columns <- annotation_columns[
+    vapply(
+      annotation_tbl[annotation_columns],
+      function(column_values) any(column_values != "Not recorded"),
+      logical(1)
+    )
+  ]
+
+  if (length(informative_columns) == 0) {
+    return(NULL)
+  }
+
+  annotation_df <- as.data.frame(annotation_tbl[informative_columns], stringsAsFactors = FALSE)
+  rownames(annotation_df) <- sample_order
+  annotation_df
+}
+
+build_heatmap_annotation_colors <- function(annotation_df, color_overrides = NULL) {
+  purrr::imap(
+    annotation_df,
+    function(values, annotation_name) {
+      build_annotation_palette(values, annotation_name, color_overrides = color_overrides)
+    }
+  )
+}
+
+build_column_annotation <- function(annotation_df, color_overrides = NULL) {
+  if (is.null(annotation_df) || ncol(annotation_df) == 0) {
+    return(NULL)
+  }
+
+  ComplexHeatmap::HeatmapAnnotation(
+    df = annotation_df,
+    col = build_heatmap_annotation_colors(annotation_df, color_overrides = color_overrides),
+    na_col = "#f2f2f2",
+    annotation_name_gp = grid::gpar(fontsize = 8),
+    annotation_legend_param = stats::setNames(
+      purrr::map(names(annotation_df), ~ list(title = .x)),
+      names(annotation_df)
+    ),
+    simple_anno_size = grid::unit(0.16, "in")
+  )
+}
+
+make_heatmap_color_function <- function(values) {
+  finite_values <- as.numeric(values[is.finite(values)])
+  if (length(finite_values) == 0) {
+    finite_values <- c(0, 1)
+  }
+
+  value_range <- range(finite_values, na.rm = TRUE)
+  if (isTRUE(all.equal(value_range[[1]], value_range[[2]]))) {
+    delta <- if (value_range[[1]] == 0) 1 else abs(value_range[[1]]) * 0.1
+    breaks <- c(value_range[[1]] - delta, value_range[[1]], value_range[[1]] + delta)
+  } else {
+    breaks <- c(value_range[[1]], mean(value_range), value_range[[2]])
+  }
+
+  # Cell-type abundances and proportions are single-direction (>= 0), so use a
+  # sequential, colorblind-safe viridis ramp (option C / plasma) rather than a
+  # divergent blue-white-red scheme. This matches the reference heatmap above.
+  circlize::colorRamp2(breaks, c("#0D0887", "#CC4778", "#F0F921"))
+}
+
+plot_abundance_heatmap <- function(
+  result_matrix,
+  value_label,
+  sample_metadata_tbl,
+  annotation_columns,
+  annotation_color_overrides = NULL,
+  show_sample_labels = FALSE
+) {
+  plot_mat <- result_matrix
+  plot_mat[!is.finite(plot_mat)] <- NA_real_
+  plot_mat <- plot_mat[, colSums(plot_mat, na.rm = TRUE) > 0, drop = FALSE]
+
+  if (ncol(plot_mat) == 0) {
+    stop(sprintf("No non-zero cell-type columns available for %s heatmap.", value_label), call. = FALSE)
+  }
+
+  sample_order <- if (nrow(plot_mat) > 1) {
+    rownames(plot_mat)[stats::hclust(stats::dist(replace(plot_mat, is.na(plot_mat), 0)))$order]
+  } else {
+    rownames(plot_mat)
+  }
+
+  cell_order <- if (ncol(plot_mat) > 1) {
+    colnames(plot_mat)[stats::hclust(stats::dist(t(replace(plot_mat, is.na(plot_mat), 0))))$order]
+  } else {
+    colnames(plot_mat)
+  }
+
+  plot_mat <- plot_mat[sample_order, cell_order, drop = FALSE]
+  heatmap_mat <- t(plot_mat)
+
+  annotation_df <- build_heatmap_annotation_data(
+    metadata_tbl = sample_metadata_tbl,
+    sample_order = sample_order,
+    annotation_columns = annotation_columns
+  )
+
+  top_annotation <- build_column_annotation(
+    annotation_df = annotation_df,
+    color_overrides = annotation_color_overrides
+  )
+
+  ComplexHeatmap::Heatmap(
+    heatmap_mat,
+    name = value_label,
+    col = make_heatmap_color_function(heatmap_mat),
+    na_col = "#f2f2f2",
+    top_annotation = top_annotation,
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    show_column_names = isTRUE(show_sample_labels),
+    show_row_names = TRUE,
+    column_names_rot = 90,
+    column_names_gp = grid::gpar(fontsize = 6),
+    row_names_gp = grid::gpar(fontsize = 8),
+    row_title = "Estimated cell type",
+    column_title = "GeoMx samples / AOIs",
+    # Thin per-cell white borders read cleanly on small matrices, but across many
+    # sample columns the 0.2pt gridlines anti-alias over the dark (near-zero)
+    # regions and merge into a washed-out grey band artefact. Drop the borders
+    # when there are many columns so the sequential colour is shown faithfully.
+    rect_gp = if (ncol(heatmap_mat) > 40) grid::gpar(col = NA) else grid::gpar(col = "white", lwd = 0.2),
+    heatmap_legend_param = list(title = value_label)
+  )
+}
+
+save_plot_png <- function(plot, file_name, width, height) {
+  ggplot2::ggsave(
+    filename = file_name,
+    plot = plot,
+    width = width,
+    height = height,
+    dpi = params$figure_dpi,
+    bg = "white"
+  )
+  file_name
+}
+
+draw_stage8_heatmap <- function(heatmap) {
+  ComplexHeatmap::draw(
+    heatmap,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right",
+    merge_legend = FALSE
+  )
+}
+
+save_complex_heatmap_png <- function(heatmap, file_name, width, height) {
+  grDevices::png(
+    filename = file_name,
+    width = width,
+    height = height,
+    units = "in",
+    res = params$figure_dpi,
+    bg = "white"
+  )
+  on.exit(grDevices::dev.off(), add = TRUE)
+  draw_stage8_heatmap(heatmap)
+  file_name
+}
+```
+
+## Load normalized GeoMx object
+
+The input object should come from the stage 3 normalization workflow. By default, this stage uses the Q3-normalized object and `q_norm` assay because that option most closely matches the SpatialDecon GeoMx vignette and has worked more reliably in the example deconvolution run.
+
+GeoDiff-filtered count data is not required for Stage 8. If GeoDiff was skipped earlier, keep `norm_object_file: "normalised_spatial_data.RDS"` and `norm_assay: "q_norm"`. Users can choose the GeoDiff-normalized object and `normmat` assay for consistency checks with the wider pipeline only when the GeoDiff-normalized object exists; that option may fail during the numerical SpatialDecon fit for some datasets.
+
+```{r}
+#| label: load-normalized-object
+
+input_file_status <- tibble::tibble(
+  input = c(
+    "Selected Stage 8 input",
+    "Default Q3/negative-probe object",
+    "Optional GeoDiff-normalized object"
+  ),
+  required_for_stage8 = c("Yes", "Recommended default", "No"),
+  path = c(norm_input_path, q3_norm_input_path, geodiff_norm_input_path),
+  file_found = c(
+    file.exists(norm_input_path),
+    file.exists(q3_norm_input_path),
+    file.exists(geodiff_norm_input_path)
+  ),
+  action = c(
+    ifelse(file.exists(norm_input_path), "This object will be loaded for SpatialDecon.", "Stage 8 cannot run until this selected object exists."),
+    ifelse(file.exists(q3_norm_input_path), "Available for the recommended Stage 8 option that does not require GeoDiff.", "Missing; run Stage 3 Q3/negative-probe normalization first."),
+    dplyr::case_when(
+      selected_norm_is_geodiff & file.exists(geodiff_norm_input_path) ~ "Selected for optional GeoDiff-normalized normmat consistency checking.",
+      selected_norm_is_geodiff & !file.exists(geodiff_norm_input_path) ~ "Selected but missing; if GeoDiff was skipped, use normalised_spatial_data.RDS with q_norm.",
+      file.exists(geodiff_norm_input_path) ~ "Available if the user explicitly selects the GeoDiff normmat option.",
+      TRUE ~ "GeoDiff-normalized object not found; this is acceptable when using the default Q3 Stage 8 option."
+    )
+  )
+)
+
+readr::write_csv(input_file_status, fs::path(out_tables, "stage8_input_file_status.csv"))
+
+protocol_kable(
+  input_file_status,
+  caption = "Stage 8 input file availability. GeoDiff is optional; the default Q3 option remains valid when GeoDiff outputs are absent."
+)
+
+if (!file.exists(norm_input_path)) {
+  geodiff_guidance <- if (selected_norm_is_geodiff) {
+    paste(
+      "The selected Stage 8 input uses GeoDiff-normalized normmat data, but the GeoDiff-normalized object was not found.",
+      "If GeoDiff was intentionally skipped, use norm_object_file: \"normalised_spatial_data.RDS\" and norm_assay: \"q_norm\"."
+    )
+  } else {
+    "Run Stage 3 normalization first and confirm the selected norm_object_file points to an existing object."
+  }
+  stop(
+    sprintf(
+      paste(
+        "Normalized GeoMx object not found: %s",
+        "%s",
+        "Check project_root, norm_stage, norm_results_dir, and norm_object_file.",
+        sep = "\n"
+      ),
+      norm_input_path,
+      geodiff_guidance
+    ),
+    call. = FALSE
+  )
+}
+
+spatial_obj <- readRDS(norm_input_path)
+
+if (!(params$norm_assay %in% Biobase::assayDataElementNames(spatial_obj))) {
+  stop(
+    sprintf(
+      "Normalized assay '%s' was not found. Available assays: %s",
+      params$norm_assay,
+      paste(Biobase::assayDataElementNames(spatial_obj), collapse = ", ")
+    ),
+    call. = FALSE
+  )
+}
+
+if (!(params$raw_assay %in% Biobase::assayDataElementNames(spatial_obj))) {
+  stop(
+    sprintf(
+      "Raw assay '%s' was not found. Available assays: %s",
+      params$raw_assay,
+      paste(Biobase::assayDataElementNames(spatial_obj), collapse = ", ")
+    ),
+    call. = FALSE
+  )
+}
+
+feature_metadata <- Biobase::fData(spatial_obj)
+if (!("Negative" %in% colnames(feature_metadata)) && "CodeClass" %in% colnames(feature_metadata)) {
+  Biobase::fData(spatial_obj)$Negative <- trimws(as.character(feature_metadata$CodeClass)) == "Negative"
+  feature_metadata <- Biobase::fData(spatial_obj)
+}
+
+required_feature_columns <- c("Module", "TargetName", "Negative")
+missing_feature_columns <- setdiff(required_feature_columns, colnames(feature_metadata))
+if (length(missing_feature_columns) > 0) {
+  stop(
+    sprintf(
+      paste(
+        "The GeoMx object is missing feature metadata required by SpatialDecon background estimation: %s.",
+        "Confirm that the stage 3 input object retains TargetName, Module, and negative-probe annotation."
+      ),
+      paste(missing_feature_columns, collapse = ", ")
+    ),
+    call. = FALSE
+  )
+}
+
+negative_flags <- feature_metadata$Negative
+if (!is.logical(negative_flags)) {
+  negative_flags <- tolower(trimws(as.character(negative_flags))) %in% c("true", "t", "1", "yes", "negative")
+}
+
+if (!any(negative_flags, na.rm = TRUE)) {
+  stop(
+    "No negative-control probes were flagged in fData(spatial_obj)$Negative. SpatialDecon needs negative probes to estimate GeoMx background.",
+    call. = FALSE
+  )
+}
+
+sample_metadata_full <- Biobase::pData(spatial_obj) %>%
+  as.data.frame(check.names = FALSE) %>%
+  tibble::rownames_to_column("sample_id") %>%
+  tibble::as_tibble()
+
+context_columns <- intersect(as_character_vector(params$metadata_context_columns), colnames(sample_metadata_full))
+sample_metadata_context <- sample_metadata_full %>%
+  dplyr::select(sample_id, dplyr::all_of(context_columns))
+heatmap_annotation_columns <- intersect(
+  as_character_vector(params$heatmap_annotation_columns),
+  colnames(sample_metadata_full)
+)
+
+input_summary <- tibble::tibble(
+  item = c(
+    "Input object",
+    "Normalized assay",
+    "Raw assay",
+    "Features",
+    "Samples",
+    "Metadata context columns",
+    "Heatmap annotation columns"
+  ),
+  value = c(
+    fs::path_rel(norm_input_path, start = project_root),
+    params$norm_assay,
+    params$raw_assay,
+    as.character(nrow(spatial_obj)),
+    as.character(ncol(spatial_obj)),
+    if (length(context_columns) > 0) paste(context_columns, collapse = ", ") else "None detected",
+    if (length(heatmap_annotation_columns) > 0) paste(heatmap_annotation_columns, collapse = ", ") else "None detected"
+  )
+)
+
+readr::write_csv(input_summary, fs::path(out_tables, "stage8_input_summary.csv"))
+
+protocol_kable(
+  input_summary,
+  caption = "Stage 8 input object and assay configuration"
+)
+```
+
+::: {.callout-note}
+## Input decision checkpoint
+Confirm that the selected normalized assay is appropriate for the question being asked. `q_norm` is the recommended Stage 8 default because it follows the SpatialDecon GeoMx vignette more closely. `normmat` remains available for GeoDiff consistency checks, but a singular-system error at the SpatialDecon fit is a signal to return to `normalised_spatial_data.RDS` with `q_norm`.
+:::
+
+## Load and audit reference matrix
+
+The selected reference matrix defines the cell types that SpatialDecon can estimate. A mismatch between reference and tissue can produce precise-looking but biologically unhelpful estimates, so this notebook records reference provenance, cell-type coverage, and gene overlap before fitting.
+
+```{r}
+#| label: load-reference-matrix
+
+reference_info <- load_reference_matrix()
+profile_matrix <- reference_info$matrix
+
+reference_rds_path <- fs::path(out_results_decon, "stage8_reference_matrix.rds")
+saveRDS(
+  list(
+    profile_matrix = profile_matrix,
+    cell_groups = reference_info$cell_groups,
+    metadata = reference_info$metadata,
+    source = reference_info$source,
+    source_detail = reference_info$source_detail,
+    reference_parameters = list(
+      reference_source = params$reference_source,
+      reference_species = params$reference_species,
+      reference_age_group = params$reference_age_group,
+      reference_matrix_name = params$reference_matrix_name,
+      reference_file = params$reference_file,
+      transpose_reference = params$transpose_reference
+    )
+  ),
+  reference_rds_path
+)
+
+geomx_genes <- rownames(spatial_obj)
+reference_genes <- rownames(profile_matrix)
+overlap_genes <- intersect(geomx_genes, reference_genes)
+
+if (length(overlap_genes) == 0 && length(intersect(geomx_genes, colnames(profile_matrix))) > 0) {
+  stop(
+    paste(
+      "No overlap was found between GeoMx feature names and reference row names,",
+      "but overlap was found with reference column names. The reference may be transposed;",
+      "set transpose_reference: true after verifying the file orientation."
+    ),
+    call. = FALSE
+  )
+}
+
+reference_audit <- tibble::tibble(
+  item = c(
+    "Reference source",
+    "Reference matrix",
+    "Reference species",
+    "Reference age group",
+    "Reference cache/file",
+    "Saved reference object",
+    "Reference genes",
+    "Reference cell types",
+    "GeoMx features",
+    "Overlapping genes",
+    "Reference overlap",
+    "GeoMx feature overlap"
+  ),
+  value = c(
+    reference_info$source_detail,
+    params$reference_matrix_name,
+    params$reference_species,
+    params$reference_age_group,
+    dplyr::coalesce(reference_info$cache_path, reference_info$file_path, "package data"),
+    fs::path_rel(reference_rds_path, start = project_root),
+    as.character(nrow(profile_matrix)),
+    as.character(ncol(profile_matrix)),
+    as.character(length(geomx_genes)),
+    as.character(length(overlap_genes)),
+    scales::percent(length(overlap_genes) / nrow(profile_matrix), accuracy = 0.1),
+    scales::percent(length(overlap_genes) / length(geomx_genes), accuracy = 0.1)
+  )
+)
+
+readr::write_csv(reference_audit, fs::path(out_tables, "stage8_reference_audit.csv"))
+
+if (!is.null(reference_info$metadata)) {
+  reference_metadata_tbl <- tibble::as_tibble(reference_info$metadata)
+  readr::write_csv(reference_metadata_tbl, fs::path(out_tables, "stage8_reference_metadata.csv"))
+}
+
+gene_overlap_tbl <- tibble::tibble(overlap_gene = sort(overlap_genes))
+readr::write_csv(gene_overlap_tbl, fs::path(out_tables, "stage8_reference_gene_overlap.csv"))
+
+min_overlap <- as_integer_scalar(params$min_reference_gene_overlap, default = 25)
+if (length(overlap_genes) < min_overlap) {
+  msg <- sprintf(
+    "Only %s genes overlap between the GeoMx object and the selected reference; configured minimum is %s.",
+    length(overlap_genes),
+    min_overlap
+  )
+  if (as_logical_scalar(params$stop_on_low_gene_overlap, default = TRUE)) {
+    stop(msg, call. = FALSE)
+  }
+  warning(msg, call. = FALSE)
+}
+
+protocol_kable(
+  reference_audit,
+  caption = "Reference matrix audit and gene-overlap summary"
+)
+```
+
+## Reference cell-type inventory
+
+This table lists the cell types encoded in the selected reference matrix. Review it before interpreting the abundance heatmaps, because SpatialDecon can only estimate the populations represented by the reference columns.
+
+```{r}
+#| label: reference-cell-type-inventory
+
+reference_cell_type_inventory <- build_reference_cell_type_inventory(
+  reference_matrix = profile_matrix,
+  cell_groups = reference_info$cell_groups
+)
+
+readr::write_csv(
+  reference_cell_type_inventory,
+  fs::path(out_tables, "stage8_reference_cell_type_inventory.csv")
+)
+
+reference_cell_type_inventory_display <- reference_cell_type_inventory %>%
+  dplyr::mutate(
+    nonzero_gene_fraction = scales::percent(.data$nonzero_gene_fraction, accuracy = 0.1),
+    dplyr::across(
+      c("mean_profile_value", "median_profile_value", "p95_profile_value", "max_profile_value"),
+      ~ signif(.x, 3)
+    )
+  )
+
+DT::datatable(
+  reference_cell_type_inventory_display,
+  rownames = FALSE,
+  options = list(scrollX = TRUE, pageLength = 15),
+  caption = "Reference cell-type inventory for the selected SpatialDecon matrix"
+)
+```
+
+::: {.callout-important}
+## Reference decision checkpoint
+Proceed only if the selected reference has plausible cell-type coverage and enough gene overlap for your dataset. Low overlap may indicate incompatible gene identifiers, an unsuitable reference, or a transposed local matrix. If a cell type is not represented in the reference inventory, its absence from the SpatialDecon output should not be interpreted as evidence that the population is absent from the tissue.
+:::
+
+## Reference profile heatmap
+
+This heatmap shows the selected cell profile matrix after each gene is scaled by its maximum expression across cell types. For large references, the plot displays the most variable genes so the figure remains readable in the rendered protocol document.
+
+```{r}
+#| label: fig-reference-profile-heatmap
+#| fig-cap: "Reference profile heatmap. Rows are genes selected from the configured reference matrix and columns are reference cell types. Each gene is scaled by its maximum reference expression, so the plot highlights cell-type specificity rather than absolute expression."
+#| fig-width: 11
+#| fig-height: 8
+
+reference_heatmap <- plot_reference_heatmap(
+  reference_matrix = profile_matrix,
+  max_genes = as_integer_scalar(params$reference_heatmap_max_genes, default = 500)
+)
+
+reference_heatmap_path <- save_plot_png(
+  reference_heatmap,
+  fs::path(out_figures_decon, "reference_profile_heatmap.png"),
+  width = params$fig_width_standard,
+  height = params$fig_height_standard
+)
+
+reference_heatmap
+```
+
+::: {.callout-note}
+## Interpreting the reference heatmap
+Use this plot to confirm that the reference contains interpretable cell-type-specific structure. A flat or sparse-looking reference may not support stable deconvolution for the selected GeoMx dataset.
+:::
+
+## Run SpatialDecon
+
+This stage runs the basic GeoMx wrapper from `SpatialDecon`. The wrapper estimates expected background internally from negative probes and aligns the GeoMx data to the selected reference genes.
+
+```{r}
+#| label: run-spatialdecon
+
+message(
+  glue::glue(
+    "Running SpatialDecon with norm_elt='{params$norm_assay}', ",
+    "raw_elt='{params$raw_assay}', and reference='{params$reference_matrix_name}'."
+  )
+)
+
+decon_obj <- tryCatch(
+  SpatialDecon::runspatialdecon(
+    object = spatial_obj,
+    norm_elt = params$norm_assay,
+    raw_elt = params$raw_assay,
+    X = profile_matrix,
+    align_genes = TRUE
+  ),
+  error = function(e) {
+    q_norm_recovery <- paste(
+      "If this is a singular-system error, or if you are using the GeoDiff normmat route,",
+      "rerun Stage 8 with the vignette-style q_norm input:",
+      "",
+      "norm_object_file: \"normalised_spatial_data.RDS\"",
+      "norm_assay: \"q_norm\"",
+      sep = "\n"
+    )
+
+    stop(
+      sprintf(
+        paste(
+          "SpatialDecon fitting failed for the selected input assay and reference matrix.",
+          "Review the reference choice, gene-overlap audit, normalized assay, and negative-probe metadata.",
+          q_norm_recovery,
+          "Original error: %s",
+          sep = "\n"
+        ),
+        conditionMessage(e)
+      ),
+      call. = FALSE
+    )
+  }
+)
+
+saveRDS(decon_obj, decon_rds_path)
+
+result_inventory <- tibble::tibble(
+  result = c("beta", "p", "t", "se", "prop_of_all", "prop_of_nontumor", "resids", "yhat"),
+  available = c(
+    !is.null(safe_result_matrix(decon_obj, "beta")),
+    !is.null(safe_result_matrix(decon_obj, "p")),
+    !is.null(safe_result_matrix(decon_obj, "t")),
+    !is.null(safe_result_matrix(decon_obj, "se")),
+    !is.null(safe_result_matrix(decon_obj, "prop_of_all")),
+    !is.null(safe_result_matrix(decon_obj, "prop_of_nontumor")),
+    "resids" %in% Biobase::assayDataElementNames(decon_obj),
+    "yhat" %in% Biobase::assayDataElementNames(decon_obj)
+  )
+)
+
+readr::write_csv(result_inventory, fs::path(out_tables, "stage8_result_inventory.csv"))
+
+protocol_kable(
+  result_inventory,
+  caption = "SpatialDecon result components available after the basic run"
+)
+```
+
+## Export deconvolution tables
+
+The `beta` matrix contains the primary cell abundance scores. Proportion matrices rescale abundance estimates per sample and are useful for QC interpretation, but they should not be treated as formal differential abundance results in this first version of the notebook.
+
+```{r}
+#| label: export-deconvolution-tables
+
+beta_matrix <- safe_result_matrix(decon_obj, "beta")
+prop_all_matrix <- safe_result_matrix(decon_obj, "prop_of_all")
+prop_nontumor_matrix <- safe_result_matrix(decon_obj, "prop_of_nontumor")
+p_matrix <- safe_result_matrix(decon_obj, "p")
+t_matrix <- safe_result_matrix(decon_obj, "t")
+se_matrix <- safe_result_matrix(decon_obj, "se")
+
+if (is.null(beta_matrix)) {
+  stop("SpatialDecon did not return a beta matrix.", call. = FALSE)
+}
+
+result_matrices <- list(
+  beta = beta_matrix,
+  prop_of_all = prop_all_matrix,
+  prop_of_nontumor = prop_nontumor_matrix,
+  p = p_matrix,
+  t = t_matrix,
+  se = se_matrix
+)
+
+purrr::iwalk(result_matrices, function(mat, result_name) {
+  if (is.null(mat)) {
+    return(invisible(NULL))
+  }
+
+  wide_tbl <- build_wide_result_table(mat, sample_metadata_context)
+  long_tbl <- matrix_to_long(mat, value_name = result_name) %>%
+    dplyr::left_join(sample_metadata_context, by = "sample_id") %>%
+    dplyr::relocate(dplyr::all_of(context_columns), .after = sample_id)
+
+  readr::write_csv(wide_tbl, fs::path(out_tables, paste0("stage8_", result_name, "_wide.csv")))
+  readr::write_csv(long_tbl, fs::path(out_tables, paste0("stage8_", result_name, "_long.csv")))
+})
+
+beta_long <- matrix_to_long(beta_matrix, value_name = "beta") %>%
+  dplyr::left_join(sample_metadata_context, by = "sample_id") %>%
+  dplyr::relocate(dplyr::all_of(context_columns), .after = sample_id)
+
+DT::datatable(
+  beta_long,
+  rownames = FALSE,
+  options = list(scrollX = TRUE, scrollY = "420px", pageLength = 15),
+  caption = "SpatialDecon beta abundance estimates in long format"
+)
+```
+
+## Cell abundance heatmap
+
+The primary heatmap shows SpatialDecon `beta` abundance estimates across samples and reference cell types. Top annotation bars show the configured sample metadata columns when they are present in the GeoMx object. Use these annotations as a plausibility check: immune-rich, stromal, epithelial, or other stained/segmented regions should show composition patterns that make biological sense for the chosen reference.
+
+```{r}
+#| label: fig-beta-heatmap
+#| fig-cap: "SpatialDecon beta abundance heatmap with metadata annotation bars. Rows are estimated reference cell types and columns are GeoMx samples/AOIs. Top annotations show configured sample metadata such as segment, staining, disease, tissue, or slide context when available."
+#| fig-width: 13
+#| fig-height: 8
+
+beta_heatmap <- plot_abundance_heatmap(
+  result_matrix = beta_matrix,
+  value_label = "Beta",
+  sample_metadata_tbl = sample_metadata_full,
+  annotation_columns = heatmap_annotation_columns,
+  annotation_color_overrides = params$heatmap_annotation_color_overrides,
+  show_sample_labels = as_logical_scalar(params$show_heatmap_sample_labels, default = FALSE)
+)
+
+beta_heatmap_path <- save_complex_heatmap_png(
+  beta_heatmap,
+  fs::path(out_figures_decon, "spatialdecon_beta_heatmap.png"),
+  width = params$fig_width_wide,
+  height = params$fig_height_standard
+)
+
+draw_stage8_heatmap(beta_heatmap)
+```
+
+::: {.callout-important}
+## Decision checkpoint
+Review whether high-abundance cell types are plausible for the segment labels, staining or capture strategy, tissue context, and disease status shown in the annotation bars. For example, immune-cell estimates should be enriched in immune-targeted or immune-stained regions when that is expected from the assay design. Unexpected patterns are not automatically wrong, but they should trigger review of the reference choice, normalization assay, metadata labels, and gene-overlap audit.
+:::
+
+## Proportion heatmap
+
+When available, `prop_of_all` rescales each sample's fitted abundance estimates to proportions. This is often easier to inspect visually than raw `beta` values. The same top annotation bars are used so users can compare proportional composition against segment, staining, tissue, disease, and slide context.
+
+```{r}
+#| label: fig-proportion-heatmap
+#| fig-cap: "SpatialDecon prop_of_all heatmap with metadata annotation bars. Rows are estimated reference cell types and columns are GeoMx samples/AOIs. Values are within-sample proportions derived from the basic SpatialDecon fit; top annotations show configured sample metadata when available."
+#| fig-width: 13
+#| fig-height: 8
+
+if (!is.null(prop_all_matrix)) {
+  prop_all_heatmap <- plot_abundance_heatmap(
+    result_matrix = prop_all_matrix,
+    value_label = "Proportion",
+    sample_metadata_tbl = sample_metadata_full,
+    annotation_columns = heatmap_annotation_columns,
+    annotation_color_overrides = params$heatmap_annotation_color_overrides,
+    show_sample_labels = as_logical_scalar(params$show_heatmap_sample_labels, default = FALSE)
+  )
+
+  prop_all_heatmap_path <- save_complex_heatmap_png(
+    prop_all_heatmap,
+    fs::path(out_figures_decon, "spatialdecon_prop_of_all_heatmap.png"),
+    width = params$fig_width_wide,
+    height = params$fig_height_standard
+  )
+
+  draw_stage8_heatmap(prop_all_heatmap)
+} else {
+  message("prop_of_all was not available; skipping proportion heatmap.")
+}
+```
+
+## Residual QC summary
+
+SpatialDecon writes fitted values and residuals back to the GeoMx object. Residual summaries provide a compact QC view of how well the fitted cell-type mixture explains each sample's expression profile.
+
+```{r}
+#| label: residual-qc-summary
+#| warning: false
+
+if ("resids" %in% Biobase::assayDataElementNames(decon_obj)) {
+  residual_matrix <- Biobase::assayDataElement(decon_obj, "resids")
+
+  residual_qc <- tibble::tibble(
+    sample_id = colnames(residual_matrix),
+    modelled_genes = colSums(!is.na(residual_matrix)),
+    mean_abs_residual = colMeans(abs(residual_matrix), na.rm = TRUE),
+    median_abs_residual = apply(abs(residual_matrix), 2, stats::median, na.rm = TRUE),
+    max_abs_residual = apply(abs(residual_matrix), 2, max, na.rm = TRUE),
+    fraction_abs_residual_gt_1 = colMeans(abs(residual_matrix) > 1, na.rm = TRUE),
+    fraction_abs_residual_gt_2 = colMeans(abs(residual_matrix) > 2, na.rm = TRUE)
+  ) %>%
+    dplyr::left_join(sample_metadata_context, by = "sample_id") %>%
+    dplyr::relocate(dplyr::all_of(context_columns), .after = sample_id)
+
+  readr::write_csv(residual_qc, fs::path(out_tables, "stage8_residual_qc_summary.csv"))
+
+  residual_qc_summary <- residual_qc %>%
+    dplyr::summarise(
+      samples = dplyr::n(),
+      median_modelled_genes = stats::median(.data$modelled_genes, na.rm = TRUE),
+      median_mean_abs_residual = stats::median(.data$mean_abs_residual, na.rm = TRUE),
+      median_fraction_abs_residual_gt_2 = stats::median(.data$fraction_abs_residual_gt_2, na.rm = TRUE)
+    )
+
+  readr::write_csv(residual_qc_summary, fs::path(out_tables, "stage8_residual_qc_summary_compact.csv"))
+
+  protocol_kable(
+    residual_qc_summary,
+    caption = "Compact residual QC summary across samples"
+  )
+} else {
+  residual_qc <- tibble::tibble(note = "SpatialDecon residual matrix was not available.")
+  readr::write_csv(residual_qc, fs::path(out_tables, "stage8_residual_qc_summary.csv"))
+  protocol_kable(residual_qc, caption = "Residual QC summary")
+}
+```
+
+::: {.callout-note}
+## Interpreting residual summaries
+Large residuals can indicate that the selected reference does not cover important biology in the sample, that normalization/background assumptions need review, or that a subset of genes is poorly explained by cell mixing. Treat this as a QC signal rather than a rejection rule.
+:::
+
+## Output list
+
+```{r}
+#| label: output-list
+
+output_list_files <- c(
+  list.files(out_results, recursive = TRUE, full.names = TRUE),
+  list.files(out_tables, recursive = TRUE, full.names = TRUE),
+  list.files(out_figures, recursive = TRUE, full.names = TRUE),
+  list.files(reference_cache_dir, recursive = TRUE, full.names = TRUE)
+)
+
+output_list <- tibble::tibble(path = unique(output_list_files)) %>%
+  dplyr::filter(file.exists(.data$path)) %>%
+  dplyr::mutate(relative_path = dplyr::if_else(
+    startsWith(fs::path_norm(.data$path), fs::path_norm(project_root)),
+    fs::path_rel(.data$path, start = project_root),
+    .data$path
+  )) %>%
+  dplyr::arrange(.data$relative_path)
+
+readr::write_csv(output_list, fs::path(out_tables, "stage8_output_list.csv"))
+
+DT::datatable(
+  output_list,
+  rownames = FALSE,
+  options = list(scrollX = TRUE, scrollY = "420px", pageLength = 15),
+  caption = "8 spatial deconvolution output list"
+)
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

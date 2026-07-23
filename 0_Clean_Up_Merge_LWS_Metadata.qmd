@@ -1,0 +1,1255 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "Standardize and Merge Metadata and Lab Worksheet (LWS)"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+    include-in-header:
+      text: |
+        <style>
+        :root {
+          --bs-body-font-family: "Segoe UI", Arial, sans-serif;
+          --bs-font-sans-serif: "Segoe UI", Arial, sans-serif;
+          --bs-code-font-family: "Segoe UI", Arial, sans-serif;
+        }
+        body,
+        body *:not(svg):not(svg *) {
+          font-family: "Segoe UI", Arial, sans-serif !important;
+        }
+        </style>
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+
+params:
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+  dir_src: "src"
+  data_dir_name: "Data"
+  individual_readout_group_dir_name: "Individual_Readout_Groups"
+  metadata_dir_name: "Metadata"
+  outputs_dir_name: "Outputs"
+  clean_merge_output_dir_name: "0_Clean_And_Merge"
+  cleaned_output_dir_name: "Cleaned"
+  final_merged_filename: "Complete_LWS_Metadata.xlsx"
+
+  # LWS input selection.
+  # Leave both blank to auto-detect all raw LWS files in the configured folder.
+  # Set lws_input_file for one file, or lws_input_files for multiple selected files.
+  lws_input_file: "GSE226829_PreQC_segments_annotation.xlsx"
+  lws_input_files:
+    value: []
+
+  # Metadata input selection.
+  # Leave blank when zero or exactly one metadata file is present.
+  # Set explicitly when multiple metadata files are present.
+  metadata_input_file: ""
+
+  # Optional merge key configuration.
+  # Column names are cleaned to snake_case before matching. For example,
+  # an original column named "Sample ID" or "Sample_ID" is checked as "sample_id".
+  # Keep AUTO unless you need to force a specific cleaned column name.
+  lws_link_column: "AUTO"
+  metadata_link_column: "AUTO"
+
+  check_segment_naming: true
+  segment_column_name: "segment"
+  warn_on_case_variants: true
+---
+
+# Standardize and Merge Metadata and Lab Worksheet (0)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook is written for users applying the workflow to their own dataset. Read each section in order, confirm required inputs before running code sections, and use the YAML parameters at the top of the file to adapt paths and thresholds for your study design.
+:::
+
+::: {.callout-warning collapse="true"}
+## Before you run
+Validate input data and metadata column names first. Most runtime issues in protocol use are caused by path mismatches, missing files, or dataset-specific column naming differences.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+This notebook runs a full **clean-and-merge preprocessing step** for GeoMx LWS and metadata files.
+
+Lab Worksheet (LWS) files, also known as individual readout groups, are generated or exported from the NanoString DSP instrument and commonly arrive as `.csv`, `.xlsx`, or `.txt` files.
+
+## What this step does
+
+1.  Cleans LWS file(s) from `Data/Individual_Readout_Groups`.
+2.  Cleans metadata file(s) from `Data/Metadata` (if present).
+3.  Optionally merges LWS + metadata using a configurable link variable (**X**).
+
+## Why this matters
+
+Later notebooks need consistent column names, a predictable file layout, and one merged table when metadata is available. Running this step first prevents avoidable failures in QC and normalization.
+
+## What you decide next
+
+- If merge diagnostics are acceptable, proceed to `1_Quality_Control.qmd`.
+- If keys fail to match or metadata is missing, decide whether to continue in LWS-only mode or correct metadata and rerun this notebook.
+
+## What cleaning means here
+
+- For LWS files, the real column header is auto-detected. NanoString DSP exports often place several preamble rows (for example *Experiment Summary*, *Library Prep Summary*) above the header; these are skipped automatically for `.txt`, `.csv`, and `.xlsx` so you do not need to delete them by hand.
+- Column names are standardized with `janitor::clean_names(case = "snake")`.
+- If two raw columns clean to the same name (for example `Sample_ID` and `Sample ID` both become `sample_id`), a warning is emitted naming the originals. `janitor` keeps them distinct as `sample_id` and `sample_id_2`; rename them to distinct, meaningful names so the merge key is unambiguous (see the input-structure guidance below).
+- Basic QA warnings are emitted for duplicate rows, empty rows, and potential segment naming variants.
+- Files are written to configured `Cleaned` output folders.
+- When multiple LWS files are selected, each row receives `lws_source_file` and `lws_source_row` provenance columns before files are combined.
+
+## LWS-only fallback behavior
+
+If metadata is missing or merge keys cannot be inferred, the notebook still writes a usable LWS-only workbook for the next stage.
+
+The output path is not fixed in the code. It is built from the YAML settings:
+
+`params$project_root` / `params$outputs_dir_name` / `params$clean_merge_output_dir_name` / `params$final_merged_filename`
+
+With the default folder names, this resolves to:
+
+`<resolved project root>/Outputs/0_Clean_And_Merge/Complete_LWS_Metadata.xlsx`
+
+::: {.callout-important}
+## Enter the automatic-root option exactly
+
+Set `project_root` to your analysis project folder to write outputs there. To use the current project root detected by `here::here()`, either leave `project_root` blank or enter `project_root: "."` exactly as shown. **The quotation marks around `"."` are required**; do not enter an unquoted period (`project_root: .`).
+:::
+
+# Setup
+
+The first code section loads the packages used for reading, cleaning, and writing tabular data.
+
+```{r setup-libraries}
+#| message: false
+#| warning: false
+# Core I/O and wrangling libraries used throughout this notebook.
+# Keep this list explicit so dependency failures are easy to diagnose.
+library(readr)
+library(readxl)
+library(writexl)
+library(janitor)
+library(stringr)
+library(dplyr)
+library(fs)
+library(here)
+library(glue)
+```
+
+The next code section reads paths from the YAML settings, creates the required output folders, and checks that the expected project folders exist.
+
+```{r setup-paths-and-validation}
+#| warning: false
+# ---- YAML-driven paths (here()-first policy) ----
+project_root <- params$project_root
+if (is.null(project_root) || project_root == "" || project_root == ".") {
+  project_root <- here::here()
+} else {
+  project_root <- fs::path_abs(project_root)
+}
+
+root_via_here <- fs::path_abs(here::here())
+use_here_root <- identical(project_root, root_via_here)
+
+project_path <- function(...) {
+  if (use_here_root) {
+    here::here(...)
+  } else {
+    fs::path(project_root, ...)
+  }
+}
+dir_src <- project_path(params$dir_src)
+path_utilities_path <- fs::path(dir_src, "pathUtilities.R")
+if (!file.exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+
+# Data root that contains both readout groups and metadata folders.
+data_root <- project_path(params$data_dir_name)
+# Folder where raw LWS files are expected.
+readout_group_root <- project_path(params$data_dir_name, params$individual_readout_group_dir_name)
+# Folder where raw metadata files are expected (optional).
+metadata_root <- project_path(params$data_dir_name, params$metadata_dir_name)
+# Root output folder for all pipeline stages.
+outputs_root <- project_path(params$outputs_dir_name)
+
+# Stage-specific output destinations.
+lws_cleaned_dir <- fs::path(readout_group_root, params$cleaned_output_dir_name)
+metadata_cleaned_dir <- fs::path(metadata_root, params$cleaned_output_dir_name)
+clean_merge_output_dir <- fs::path(outputs_root, params$clean_merge_output_dir_name)
+final_stage0_path <- protocol_contract_path(
+  clean_merge_output_dir,
+  params$final_merged_filename,
+  path_limit = portable_path_limit,
+  label = "Stage 0 merged workbook"
+)
+
+# Check both this stage and the deepest standard later-stage output before the
+# user commits to a multi-stage run.
+stage0_path_audit <- protocol_path_audit(
+  c(
+    "Stage 0 merged workbook" = final_stage0_path,
+    "Stage 0 cleaned LWS directory" = lws_cleaned_dir,
+    "Deepest standard later-stage output" = project_path(
+      params$outputs_dir_name,
+      "7_Enrichment",
+      "figures",
+      "enrichment",
+      "compare",
+      "plot_00000000.png"
+    )
+  ),
+  path_limit = portable_path_limit
+)
+protocol_assert_audit(stage0_path_audit, portable_path_limit)
+
+# ---- Create output folders (safe if folders already exist) ----
+dir.create(lws_cleaned_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(metadata_cleaned_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(clean_merge_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ---- Validate required roots ----
+stopifnot(dir.exists(project_root), dir.exists(data_root), dir.exists(readout_group_root))
+
+# Metadata is optional for this workflow.
+if (!dir.exists(metadata_root)) {
+  message("Metadata folder not found at: ", metadata_root, " | continuing (LWS-only capable mode).")
+}
+
+resolved_stage0_paths <- data.frame(
+  Setting = c(
+    "Resolved project root",
+    "Final stage 0 workbook"
+  ),
+  Value = c(
+    project_root,
+    final_stage0_path
+  ),
+  stringsAsFactors = FALSE
+)
+
+knitr::kable(
+  resolved_stage0_paths,
+  caption = "Resolved project root and final stage 0 output path from the current YAML settings."
+)
+knitr::kable(
+  stage0_path_audit,
+  caption = "Path-portability check for Stage 0 and the deepest standard later-stage output."
+)
+```
+
+# Helper functions
+
+This section defines utility functions used later in the notebook. They are grouped by purpose.
+
+- **Input parsing helpers**: detect headers and delimiters across `.txt/.csv/.xlsx`.
+- **QA helpers**: report common data quality concerns.
+- **Merge-key helpers**: clean link-key values and choose merge columns.
+
+```{r helper-functions}
+# Canonical LWS header field names. A header row is identified as the first
+# sufficiently wide row that contains at least one of these exact field names
+# (compared case- and spacing-insensitively). Shared by the .txt, .csv, and
+# .xlsx readers so all three formats handle instrument exports that place
+# "Experiment Summary"/"Library Prep" preamble rows above the real header.
+lws_header_tokens <- function() {
+  c("slide name", "sample id", "sample_id", "library name", "library_name",
+    "scan name", "roi", "segment", "aoi", "panel", "area")
+}
+
+# Normalise a header cell for token matching: strip wrapping quotes/whitespace
+# and lower-case.
+normalise_header_token <- function(x) {
+  x <- as.character(x)
+  x <- str_replace_all(x, '^"|"$', "")
+  x <- str_squish(x)
+  str_to_lower(x)
+}
+
+# Given the top rows of a file as a list of character vectors, return the 0-based
+# count of leading rows to skip so reading starts at the detected header row.
+# Returns 0 when the first row is already the header (no preamble), and NA when
+# no row qualifies.
+detect_header_skip_rows <- function(rows, targets = lws_header_tokens(), min_width = 5) {
+  for (i in seq_along(rows)) {
+    tokens <- normalise_header_token(rows[[i]])
+    nonempty <- sum(nzchar(trimws(tokens)) & !(tokens %in% c("na", "")))
+    # Require minimum width + a known header token to reduce false positives.
+    if (nonempty >= min_width && any(tokens %in% targets)) return(i - 1L)
+  }
+  NA_integer_
+}
+
+# Detect where the true header starts in LWS .txt exports.
+# Returns a numeric `skip` count for read_delim().
+detect_lws_header_skip <- function(txt_path, n_max = 500) {
+  # Read only the first n lines for fast heuristic detection.
+  lines <- readLines(txt_path, warn = FALSE, n = n_max)
+  # Stop early when file has no content; later parsing would be misleading.
+  if (length(lines) == 0) stop("Input .txt file is empty: ", txt_path)
+
+  split_guess <- function(line) {
+    # Many exports are tab-delimited, but some are comma-delimited.
+    if (str_detect(line, "\\t")) str_split(line, "\\t")[[1]]
+    else str_split(line, ",")[[1]]
+  }
+
+  rows <- lapply(lines, split_guess)
+  skip_n <- detect_header_skip_rows(rows)
+  if (is.na(skip_n)) stop("Could not detect LWS header row in .txt file: ", txt_path)
+  skip_n
+}
+
+# Read a text table by guessing delimiter from early lines.
+read_txt_table_generic <- function(path) {
+  # Inspect the top of file to infer delimiter reliably.
+  top_lines <- readLines(path, warn = FALSE, n = 50)
+  tab_hits <- sum(str_detect(top_lines, "\\t"))
+  comma_hits <- sum(str_detect(top_lines, ","))
+  # Use the delimiter with the strongest evidence.
+  # Prefer tabs on ties because most LWS exports are tab-delimited.
+  delim <- if (tab_hits >= comma_hits) "\t" else ","
+  suppressMessages(readr::read_delim(path, delim = delim, show_col_types = FALSE))
+}
+
+# Return best delimiter guess for text files.
+guess_delim <- function(path, n = 50) {
+  top_lines <- readLines(path, warn = FALSE, n = n)
+  tab_hits <- sum(str_detect(top_lines, "\\t"))
+  comma_hits <- sum(str_detect(top_lines, ","))
+  # Prefer tabs on ties because most LWS exports are tab-delimited.
+  if (tab_hits >= comma_hits) "\t" else ","
+}
+
+# Unified reader for xlsx/csv/txt + consistent snake_case columns.
+read_any_tabular_file <- function(path, lws_mode = FALSE) {
+  # Dispatch reader based on extension for predictable parsing.
+  ext <- tolower(tools::file_ext(path))
+
+  # Branch by extension so each format uses the most reliable reader.
+  if (ext == "xlsx") {
+    # LWS-mode enables header-skip detection for instrument-style xlsx exports,
+    # which often carry several "Experiment Summary"/"Library Prep" rows above
+    # the real column header. Without this the reader treats the first preamble
+    # row as the header and produces placeholder column names (Column1, ...).
+    if (isTRUE(lws_mode)) {
+      preview <- suppressWarnings(suppressMessages(
+        readxl::read_xlsx(path, col_names = FALSE, n_max = 500)
+      ))
+      preview_rows <- lapply(
+        seq_len(nrow(preview)),
+        function(r) as.character(unlist(preview[r, ], use.names = FALSE))
+      )
+      skip_n <- detect_header_skip_rows(preview_rows)
+      if (is.na(skip_n)) {
+        warning(
+          "Could not detect a header row in LWS .xlsx; reading from the first row. ",
+          "If the columns look wrong, confirm the header row contains fields such as ",
+          "'Sample_ID'/'slide name'/'roi' and remove any stray pre-header rows: ",
+          basename(path),
+          call. = FALSE
+        )
+        skip_n <- 0L
+      }
+      if (skip_n > 0) {
+        message("Detected LWS header in .xlsx | skipping ", skip_n, " pre-header row(s): ", basename(path))
+      }
+      df <- suppressMessages(readxl::read_xlsx(path, skip = skip_n))
+    } else {
+      df <- readxl::read_xlsx(path)
+    }
+  } else if (ext == "csv") {
+    # Apply the same preamble detection to LWS .csv exports.
+    if (isTRUE(lws_mode)) {
+      top_lines <- readLines(path, warn = FALSE, n = 500)
+      preview_rows <- lapply(top_lines, function(l) str_split(l, ",")[[1]])
+      skip_n <- detect_header_skip_rows(preview_rows)
+      if (is.na(skip_n)) skip_n <- 0L
+      if (skip_n > 0) {
+        message("Detected LWS header in .csv | skipping ", skip_n, " pre-header row(s): ", basename(path))
+      }
+      df <- suppressMessages(readr::read_csv(path, skip = skip_n, show_col_types = FALSE))
+    } else {
+      df <- suppressMessages(readr::read_csv(path, show_col_types = FALSE))
+    }
+  } else if (ext == "txt") {
+    # LWS-mode enables header-skip detection for instrument-style text exports.
+    if (isTRUE(lws_mode)) {
+      # LWS text exports can contain pre-header lines; auto-detect skip value.
+      skip_n <- detect_lws_header_skip(path)
+      delim <- guess_delim(path)
+      message("Detected LWS header in .txt | skip = ", skip_n)
+      df <- suppressMessages(readr::read_delim(path, delim = delim, skip = skip_n, show_col_types = FALSE))
+    } else {
+      df <- read_txt_table_generic(path)
+    }
+  } else {
+    stop("Unsupported extension: ", ext)
+  }
+
+  # Surface raw columns that collapse to the same cleaned name (e.g. 'Sample_ID'
+  # and 'Sample ID' both -> 'sample_id') before they become a silent merge bug.
+  warn_on_clean_name_collisions(names(df), label = basename(path))
+
+  janitor::clean_names(df, case = "snake")
+}
+
+# Warn when two or more raw columns clean to the same snake_case base name and
+# are therefore disambiguated by janitor (e.g. 'sample_id', 'sample_id_2'). This
+# is a frequent source of silent merge bugs: an instrument export with both
+# 'Sample_ID' (a library/DSP identifier) and 'Sample ID' (a patient identifier)
+# yields two columns that look identical after cleaning, so an auto-detected join
+# can pick the wrong one.
+warn_on_clean_name_collisions <- function(original_names, label = "table") {
+  original_names <- as.character(original_names)
+  original_names <- original_names[!is.na(original_names) & nzchar(trimws(original_names))]
+  if (length(original_names) < 2) return(invisible(NULL))
+
+  # make_clean_names() per name (no cross-column de-duplication) exposes the
+  # collisions that clean_names() would otherwise hide behind _2/_3 suffixes.
+  base_clean <- vapply(
+    original_names,
+    function(nm) janitor::make_clean_names(nm, case = "snake"),
+    character(1)
+  )
+  dup_bases <- unique(base_clean[duplicated(base_clean)])
+  for (b in dup_bases) {
+    originals <- original_names[base_clean == b]
+    warning(
+      "Column-name collision in ", label, ": ",
+      paste0("'", originals, "'", collapse = " and "),
+      " all clean to '", b, "'. They are kept distinct as '", b, "', '", b, "_2', ... ",
+      "To avoid an ambiguous or wrong merge key, give these columns distinct, meaningful ",
+      "names before running (for example keep the instrument/library ID as 'library_name' ",
+      "and the patient identifier as 'patient_id' or 'sample_id'), or set the link columns ",
+      "explicitly via params$lws_link_column / params$metadata_link_column.",
+      call. = FALSE
+    )
+  }
+  invisible(NULL)
+}
+
+# Warn if duplicate full rows are present.
+warn_if_duplicate_rows <- function(df, label = "dataset") {
+  dup_n <- sum(duplicated(df))
+  # Emit warning only when duplicates exist to keep logs concise.
+  if (dup_n > 0) warning("Detected ", dup_n, " duplicated row(s) in ", label, ".", call. = FALSE)
+}
+
+# Warn if entire rows are blank/NA.
+warn_if_empty_rows <- function(df, label = "dataset") {
+  empty_n <- sum(apply(df, 1, function(x) all(is.na(x) | trimws(as.character(x)) == "")))
+  # Empty-row warning catches accidental blank lines from exports/manual edits.
+  if (empty_n > 0) warning("Detected ", empty_n, " empty row(s) in ", label, ".", call. = FALSE)
+}
+
+# Warn if common LWS columns are missing.
+warn_if_missing_common_columns <- function(df) {
+  common_cols <- c("sample_id", "slide_name", "scan_name", "segment", "aoi", "roi")
+  missing_cols <- setdiff(common_cols, names(df))
+  # Report missing typical columns, but do not fail because schemas vary by export type.
+  if (length(missing_cols) > 0) {
+    warning(
+      "LWS is missing common columns: ", paste(missing_cols, collapse = ", "),
+      ". This may still be valid depending on export type.",
+      call. = FALSE
+    )
+  }
+}
+
+# Check for non-canonical segment labels and case-only variants.
+warn_segment_name_variants <- function(df, segment_col = "segment", warn_on_case_variants = TRUE) {
+  # Gracefully skip this QA when the expected segment column is absent.
+  if (!segment_col %in% names(df)) {
+    warning("No '", segment_col, "' column found; segment naming checks skipped.", call. = FALSE)
+    return(invisible(NULL))
+  }
+
+  seg_vals <- unique(trimws(as.character(df[[segment_col]])))
+  # Remove NA/empty entries so warnings focus on meaningful labels.
+  seg_vals <- seg_vals[!is.na(seg_vals) & seg_vals != ""]
+  # Nothing to validate if all segment values are empty/NA after cleaning.
+  if (length(seg_vals) == 0) return(invisible(NULL))
+
+  canonical_map <- c(
+    "panck" = "PanCK", "a-sma" = "A-SMA", "asma" = "A-SMA", "cd45" = "CD45",
+    "stroma" = "Stroma", "glucagon" = "Glucagon", "insulin" = "Insulin"
+  )
+
+  normalise_for_lookup <- function(x) {
+    x <- tolower(x)
+    x <- gsub("_", "-", x)
+    x <- gsub("\\s+", "", x)
+    gsub("[^a-z0-9-]", "", x)
+  }
+
+  seg_tbl <- data.frame(raw = seg_vals, stringsAsFactors = FALSE)
+  seg_tbl$canonical <- canonical_map[normalise_for_lookup(seg_tbl$raw)]
+
+  noncanonical <- seg_tbl[!is.na(seg_tbl$canonical) & seg_tbl$raw != seg_tbl$canonical, , drop = FALSE]
+  # Flag labels that map to a canonical token but are written inconsistently.
+  if (nrow(noncanonical) > 0) {
+    details <- paste0("'", noncanonical$raw, "' -> '", noncanonical$canonical, "'", collapse = "; ")
+    warning("Segment naming variants detected: ", details, ". No auto-renaming applied.", call. = FALSE)
+  }
+
+  # Optional case-only check catches labels like PanCK vs panck.
+  if (isTRUE(warn_on_case_variants)) {
+    lower_groups <- split(seg_tbl$raw, tolower(seg_tbl$raw))
+    case_groups <- lower_groups[sapply(lower_groups, function(v) length(unique(v)) > 1)]
+    if (length(case_groups) > 0) {
+      msg <- paste(vapply(case_groups, function(v) paste(unique(v), collapse = " / "), character(1)), collapse = "; ")
+      warning("Potential case-only segment variants found: ", msg, ". These may be intentional.", call. = FALSE)
+    }
+  }
+
+  invisible(NULL)
+}
+
+# Generic link-key normalization for merge variable X.
+# Handles values like H_16_0026313_E, ROI-like strings, patient-style IDs, etc.
+normalise_link_key <- function(x) {
+  x <- as.character(x)
+  x <- str_to_upper(x)
+  x <- str_replace_all(x, '["*]', "")
+  x <- str_replace_all(x, "\\s+", "")
+  x <- str_replace_all(x, "[^A-Z0-9]", "_")
+  x <- str_replace_all(x, "_+", "_")
+  x <- str_replace_all(x, "^_|_$", "")
+
+  # If key looks like histology style H_YY_<digits>..., extract and de-zero digits for stable matching.
+  digits <- str_extract(x, "(?<=H_\\d{2}_)\\d+")
+  # De-zero as a string (strip leading zeros) rather than via as.integer(), which
+  # would overflow long IDs to NA (collapsing all such rows to "HKEY_NA") and
+  # coerce unpredictably. Non-matching values keep their normalized form.
+  digits <- sub("^0+(?=\\d)", "", digits, perl = TRUE)
+  key <- ifelse(!is.na(digits), paste0("HKEY_", digits), x)
+  # Treat a blank/empty result as a missing key (NA) rather than "": an absent
+  # identifier must never be used to join. Unifying "" and NA here lets the merge
+  # use na_matches = "never" so key-less rows stay unmatched instead of colliding.
+  key[!is.na(key) & !nzchar(key)] <- NA_character_
+  key
+}
+
+# Decide merge key column from explicit parameter or candidate fallbacks.
+choose_link_column <- function(df, preferred = "AUTO", candidates, table_label = "input table") {
+  # Respect explicit user configuration before using candidate fallbacks.
+  # Explicit column names are cleaned the same way input files were cleaned.
+  preferred <- if (is.null(preferred) || length(preferred) == 0) "AUTO" else trimws(as.character(preferred[[1]]))
+
+  if (is.na(preferred) || !nzchar(preferred) || toupper(preferred) == "AUTO") {
+    hit <- candidates[candidates %in% names(df)]
+    # Return first candidate in priority order or NA when none are present.
+    if (length(hit) == 0) return(NA_character_)
+    return(hit[1])
+  }
+
+  preferred_clean <- janitor::make_clean_names(preferred, case = "snake")
+
+  if (!identical(preferred, preferred_clean)) {
+    warning(
+      "Configured ", table_label, " link column '", preferred,
+      "' was checked after column-name cleaning as '", preferred_clean, "'. ",
+      "Example: an original column named 'Sample ID' or 'Sample_ID' is available after cleaning as 'sample_id'.",
+      call. = FALSE
+    )
+  }
+
+  if (!(preferred_clean %in% names(df))) {
+    stop(
+      "Configured ", table_label, " link column '", preferred,
+      "' was checked after column-name cleaning as '", preferred_clean,
+      "', but that cleaned column was not found. Available cleaned columns: ",
+      paste(names(df), collapse = ", "),
+      "\nUpdate the YAML value to the cleaned column name, for example `sample_id` for an original `Sample ID` column.",
+      call. = FALSE
+    )
+  }
+
+  preferred_clean
+}
+
+# Decide the LWS and metadata merge columns together so AUTO detection never
+# silently joins two differently named columns (e.g. 'roi' in the LWS to
+# 'sample_id' in the metadata), which produces a meaningless merge.
+#
+# Behaviour:
+#  * An explicitly configured side (not AUTO) uses that cleaned column, which
+#    must exist (validated, with warnings, by choose_link_column()).
+#  * When BOTH sides are AUTO, a single candidate column present in BOTH tables
+#    is required, chosen in candidate-priority order. A shared key is always
+#    preferred over a higher-priority key that exists in only one table (so a
+#    shared 'sample_id' wins over an LWS-only 'roi'). If no shared candidate
+#    exists, NA is returned for both sides and the caller soft-fails to LWS-only
+#    output with guidance, rather than guessing a cross-column join.
+#  * When exactly one side is AUTO, the explicit side's column name is preferred
+#    on the AUTO side when present; otherwise candidate priority is used. A join
+#    across differently named columns is reported so the user can confirm intent.
+choose_join_columns <- function(lws_df, meta_df, lws_pref, meta_pref, candidates) {
+  norm_pref <- function(p) {
+    p <- if (is.null(p) || length(p) == 0) "AUTO" else trimws(as.character(p[[1]]))
+    if (is.na(p) || !nzchar(p)) "AUTO" else p
+  }
+  lws_pref  <- norm_pref(lws_pref)
+  meta_pref <- norm_pref(meta_pref)
+  lws_auto  <- toupper(lws_pref)  == "AUTO"
+  meta_auto <- toupper(meta_pref) == "AUTO"
+
+  lws_present  <- candidates[candidates %in% names(lws_df)]
+  meta_present <- candidates[candidates %in% names(meta_df)]
+
+  if (lws_auto && meta_auto) {
+    common <- candidates[candidates %in% names(lws_df) & candidates %in% names(meta_df)]
+    if (length(common) == 0) {
+      warning(
+        "Automatic merge-key detection could not find a key column present in BOTH tables. ",
+        "LWS candidate columns found: ",
+        if (length(lws_present)) paste(lws_present, collapse = ", ") else "(none)", ". ",
+        "Metadata candidate columns found: ",
+        if (length(meta_present)) paste(meta_present, collapse = ", ") else "(none)", ". ",
+        "The notebook will not guess a join between two differently named columns. ",
+        "To merge, set params$lws_link_column and params$metadata_link_column to the columns ",
+        "that hold the SAME identifier in each table (cleaned snake_case names, e.g. 'sample_id').",
+        call. = FALSE
+      )
+      return(list(lws = NA_character_, meta = NA_character_))
+    }
+    chosen <- common[[1]]
+    if (length(common) > 1) {
+      message("Auto-detected shared merge key '", chosen,
+              "' (candidate priority). Other shared candidates: ",
+              paste(common[-1], collapse = ", "), ".")
+    } else {
+      message("Auto-detected shared merge key present in both tables: '", chosen, "'.")
+    }
+    return(list(lws = chosen, meta = chosen))
+  }
+
+  # At least one side is explicit: resolve each side, preferring a shared name on
+  # any AUTO side so paired columns match when possible.
+  lws_col  <- if (lws_auto)  NA_character_ else choose_link_column(lws_df,  lws_pref,  candidates, "LWS")
+  meta_col <- if (meta_auto) NA_character_ else choose_link_column(meta_df, meta_pref, candidates, "metadata")
+
+  if (lws_auto) {
+    lws_col <- if (!is.na(meta_col) && meta_col %in% names(lws_df)) {
+      meta_col
+    } else if (length(lws_present) > 0) {
+      lws_present[[1]]
+    } else {
+      NA_character_
+    }
+    if (is.na(lws_col)) {
+      stop("Could not auto-detect an LWS merge key. Set params$lws_link_column explicitly. ",
+           "LWS candidate columns found: ",
+           if (length(lws_present)) paste(lws_present, collapse = ", ") else "(none)", call. = FALSE)
+    }
+    message("Auto-selected LWS merge column '", lws_col, "' to pair with metadata column '", meta_col, "'.")
+  }
+
+  if (meta_auto) {
+    meta_col <- if (!is.na(lws_col) && lws_col %in% names(meta_df)) {
+      lws_col
+    } else if (length(meta_present) > 0) {
+      meta_present[[1]]
+    } else {
+      NA_character_
+    }
+    if (is.na(meta_col)) {
+      stop("Could not auto-detect a metadata merge key. Set params$metadata_link_column explicitly. ",
+           "Metadata candidate columns found: ",
+           if (length(meta_present)) paste(meta_present, collapse = ", ") else "(none)", call. = FALSE)
+    }
+    message("Auto-selected metadata merge column '", meta_col, "' to pair with LWS column '", lws_col, "'.")
+  }
+
+  if (!identical(lws_col, meta_col)) {
+    message("NOTE: merging across differently named columns — LWS '", lws_col,
+            "' to metadata '", meta_col, "'. Confirm these hold the same identifier.")
+  }
+
+  list(lws = lws_col, meta = meta_col)
+}
+
+# Return a cleaned character vector from a Quarto parameter that may be blank,
+# scalar, vector, or wrapped in a value field.
+normalise_param_vector <- function(x) {
+  if (is.null(x)) return(character(0))
+  if (is.list(x) && "value" %in% names(x)) x <- x$value
+  if (length(x) == 0) return(character(0))
+
+  x <- unlist(x, use.names = FALSE)
+  x <- trimws(as.character(x))
+  x[!is.na(x) & nzchar(x)]
+}
+
+# Return a single cleaned string from an optional scalar Quarto parameter.
+normalise_param_scalar <- function(x) {
+  x <- normalise_param_vector(x)
+  if (length(x) == 0) return("")
+  if (length(x) > 1) stop("Expected a single parameter value but received multiple values.")
+  x[[1]]
+}
+
+# Detect absolute paths without assuming a specific operating system.
+is_absolute_path_string <- function(x) {
+  grepl("^[A-Za-z]:[\\\\/]", x) | startsWith(x, "/") | startsWith(x, "\\\\")
+}
+
+# Resolve explicit file names relative to an input root while preserving user order.
+resolve_explicit_file_selection <- function(root, selected_files, file_label = "input file") {
+  selected_files <- normalise_param_vector(selected_files)
+  if (length(selected_files) == 0) return(character(0))
+
+  if (any(duplicated(selected_files))) {
+    stop("Duplicate ", file_label, " entries were provided: ",
+         paste(unique(selected_files[duplicated(selected_files)]), collapse = ", "))
+  }
+
+  selected_paths <- ifelse(
+    is_absolute_path_string(selected_files),
+    selected_files,
+    fs::path(root, selected_files)
+  )
+
+  missing_paths <- selected_paths[!file.exists(selected_paths)]
+  if (length(missing_paths) > 0) {
+    stop("Configured ", file_label, " path(s) not found: ", paste(missing_paths, collapse = "; "))
+  }
+
+  bad_ext <- selected_paths[!grepl("\\.(txt|xlsx|csv)$", selected_paths, ignore.case = TRUE)]
+  if (length(bad_ext) > 0) {
+    stop("Configured ", file_label, " path(s) must end in .txt, .xlsx, or .csv: ",
+         paste(bad_ext, collapse = "; "))
+  }
+
+  normalizePath(selected_paths, winslash = "/", mustWork = TRUE)
+}
+
+# Identify files located under a directory so generated outputs are not re-read.
+path_is_under_dir <- function(paths, dir) {
+  if (length(paths) == 0) return(logical(0))
+  if (!dir.exists(dir)) return(rep(FALSE, length(paths)))
+
+  path_norm <- normalizePath(paths, winslash = "/", mustWork = FALSE)
+  dir_norm <- normalizePath(dir, winslash = "/", mustWork = FALSE)
+  startsWith(path_norm, paste0(dir_norm, "/")) | path_norm == dir_norm
+}
+
+# Exclude generated cleaned/combined files from raw input auto-detection.
+exclude_generated_tabular_outputs <- function(paths, cleaned_dir) {
+  if (length(paths) == 0) return(paths)
+
+  generated_name <- grepl(
+    "(_cleaned|combined_lws_cleaned)\\.(xlsx|csv|txt)$",
+    basename(paths),
+    ignore.case = TRUE
+  )
+  paths[!path_is_under_dir(paths, cleaned_dir) & !generated_name]
+}
+
+# Resolve LWS input files from YAML selectors or deterministic auto-detection.
+resolve_lws_input_paths <- function(readout_group_root, lws_cleaned_dir, lws_input_file, lws_input_files) {
+  single_file <- normalise_param_scalar(lws_input_file)
+  multiple_files <- normalise_param_vector(lws_input_files)
+
+  if (nzchar(single_file) && length(multiple_files) > 0) {
+    stop("Set either lws_input_file or lws_input_files, not both.")
+  }
+
+  if (length(multiple_files) > 0) {
+    return(resolve_explicit_file_selection(readout_group_root, multiple_files, "LWS input file"))
+  }
+
+  if (nzchar(single_file)) {
+    return(resolve_explicit_file_selection(readout_group_root, single_file, "LWS input file"))
+  }
+
+  lws_candidates <- list.files(
+    path = readout_group_root,
+    pattern = "\\.(txt|xlsx|csv)$",
+    full.names = TRUE,
+    ignore.case = TRUE
+  )
+  lws_candidates <- exclude_generated_tabular_outputs(lws_candidates, lws_cleaned_dir)
+
+  if (length(lws_candidates) == 0) {
+    stop("No raw LWS .txt/.xlsx/.csv files found in: ", readout_group_root)
+  }
+
+  lws_candidates <- normalizePath(lws_candidates, winslash = "/", mustWork = TRUE)
+  lws_candidates[order(tolower(basename(lws_candidates)))]
+}
+
+# Resolve metadata input. Multiple metadata files require an explicit selection.
+resolve_metadata_input_paths <- function(metadata_root, metadata_cleaned_dir, metadata_input_file) {
+  if (!dir.exists(metadata_root)) return(character(0))
+
+  selected_metadata <- normalise_param_scalar(metadata_input_file)
+  if (nzchar(selected_metadata)) {
+    return(resolve_explicit_file_selection(metadata_root, selected_metadata, "metadata input file"))
+  }
+
+  metadata_candidates <- list.files(
+    path = metadata_root,
+    pattern = "\\.(xlsx|csv|txt)$",
+    full.names = TRUE,
+    ignore.case = TRUE
+  )
+  metadata_candidates <- exclude_generated_tabular_outputs(metadata_candidates, metadata_cleaned_dir)
+
+  if (length(metadata_candidates) == 0) return(character(0))
+
+  metadata_candidates <- normalizePath(metadata_candidates, winslash = "/", mustWork = TRUE)
+  metadata_candidates <- metadata_candidates[order(tolower(basename(metadata_candidates)))]
+
+  if (length(metadata_candidates) > 1) {
+    stop(
+      "Multiple metadata files were found. Set params$metadata_input_file to one intended file: ",
+      paste(basename(metadata_candidates), collapse = ", ")
+    )
+  }
+
+  metadata_candidates
+}
+
+# Protect provenance columns that stage 0 adds during multi-LWS consolidation.
+assert_no_reserved_lws_columns <- function(df, source_path) {
+  reserved_cols <- c("lws_source_file", "lws_source_row")
+  conflicts <- intersect(reserved_cols, names(df))
+  if (length(conflicts) > 0) {
+    stop(
+      "LWS file already contains reserved provenance column(s): ",
+      paste(conflicts, collapse = ", "),
+      ". Rename these column(s) before running stage 0: ",
+      basename(source_path)
+    )
+  }
+}
+```
+
+# 1) Clean LWS
+
+This step identifies the selected LWS input file(s), reads and standardizes each file, runs QA checks, and saves both per-file and combined cleaned workbooks.
+
+::: {.callout-important}
+## LWS selection rule
+Set `lws_input_file` for one explicit LWS file, set `lws_input_files` for several selected files, or leave both blank to auto-detect all raw LWS files in the configured readout-group folder. Auto-detected files are processed in filename order so repeated renders use the same row order.
+:::
+
+::: {.callout-important}
+## Input file structure requirements
+For predictable cleaning and merging, each LWS and metadata file should follow these rules. Most subtle bugs come from breaking one of them.
+
+1. **One real header row.** The notebook auto-detects and skips DSP preamble rows, but the detected header row must contain recognisable field names (for example `Sample_ID`, `slide name`, `roi`, `segment`). You do not need to delete preamble rows manually.
+2. **Unique, meaningful column names.** Do not ship two columns that differ only by spacing/case (for example `Sample_ID` and `Sample ID`); they collapse to the same cleaned name and force `janitor` to append `_2`. Give each its own meaning, for example:
+   - the instrument/library identifier that matches the DCC filenames (for example `DSP-1001660011751-A-A02`) named `library_name`, and
+   - the patient/sample identifier used to join metadata (for example `SPCN351`) named `sample_id` or `patient_id`.
+3. **A shared join key.** The LWS and metadata must each contain a column that holds the *same* identifier (for example a `sample_id` patient code present in both). That shared column is what the merge joins on.
+4. If your column names are non-standard, set `lws_link_column` and `metadata_link_column` explicitly rather than relying on AUTO detection.
+:::
+
+```{r clean-lws}
+#| warning: false
+# Resolve LWS files from explicit YAML selectors or deterministic auto-detection.
+lws_paths <- resolve_lws_input_paths(
+  readout_group_root = readout_group_root,
+  lws_cleaned_dir = lws_cleaned_dir,
+  lws_input_file = params$lws_input_file,
+  lws_input_files = params$lws_input_files
+)
+
+message("Selected LWS file(s): ", paste(basename(lws_paths), collapse = ", "))
+
+lws_cleaned_list <- vector("list", length(lws_paths))
+lws_raw_columns_by_file <- vector("list", length(lws_paths))
+lws_audit_records <- vector("list", length(lws_paths))
+
+for (i in seq_along(lws_paths)) {
+  lws_path <- lws_paths[[i]]
+  lws_source_file <- basename(lws_path)
+
+  # Parse and clean each selected LWS file in "LWS mode" (supports pre-header rows).
+  lws_one <- read_any_tabular_file(lws_path, lws_mode = TRUE)
+  assert_no_reserved_lws_columns(lws_one, lws_path)
+
+  # Basic QA checks are run per source file so problems remain traceable.
+  warn_if_missing_common_columns(lws_one)
+  warn_if_duplicate_rows(lws_one, paste0("LWS: ", lws_source_file))
+  warn_if_empty_rows(lws_one, paste0("LWS: ", lws_source_file))
+
+  # Segment naming QA can be toggled from YAML for strict/relaxed runs.
+  if (isTRUE(params$check_segment_naming)) {
+    warn_segment_name_variants(
+      lws_one,
+      segment_col = params$segment_column_name,
+      warn_on_case_variants = params$warn_on_case_variants
+    )
+  }
+
+  # Add row-level provenance before combining files.
+  lws_one_with_source <- dplyr::bind_cols(
+    data.frame(
+      lws_source_file = rep(lws_source_file, nrow(lws_one)),
+      lws_source_row = seq_len(nrow(lws_one)),
+      stringsAsFactors = FALSE
+    ),
+    lws_one
+  )
+
+  # Persist a cleaned workbook for each source file to keep source-level traceability.
+  lws_clean_path <- protocol_output_path(
+    lws_cleaned_dir,
+    paste0(tools::file_path_sans_ext(lws_source_file), "_cleaned.xlsx"),
+    path_limit = portable_path_limit
+  )
+  writexl::write_xlsx(lws_one_with_source, lws_clean_path)
+  message("Cleaned LWS written: ", lws_clean_path)
+
+  lws_cleaned_list[[i]] <- lws_one_with_source
+  lws_raw_columns_by_file[[i]] <- names(lws_one)
+  lws_audit_records[[i]] <- data.frame(
+    source_order = i,
+    lws_source_file = lws_source_file,
+    lws_path = lws_path,
+    cleaned_output_path = lws_clean_path,
+    rows = nrow(lws_one),
+    columns = ncol(lws_one),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Combine selected LWS files. bind_rows() preserves non-identical schemas by
+# filling absent source-file columns with NA in the combined table.
+lws_clean <- dplyr::bind_rows(lws_cleaned_list)
+
+combined_lws_clean_path <- fs::path(lws_cleaned_dir, "Combined_LWS_cleaned.xlsx")
+writexl::write_xlsx(lws_clean, combined_lws_clean_path)
+message("Combined cleaned LWS written: ", combined_lws_clean_path)
+
+lws_file_audit <- dplyr::bind_rows(lws_audit_records)
+all_lws_raw_columns <- sort(unique(unlist(lws_raw_columns_by_file, use.names = FALSE)))
+lws_schema_inventory <- dplyr::bind_rows(lapply(seq_along(lws_paths), function(i) {
+  data.frame(
+    source_order = i,
+    lws_source_file = basename(lws_paths[[i]]),
+    column_name = all_lws_raw_columns,
+    column_present = all_lws_raw_columns %in% lws_raw_columns_by_file[[i]],
+    stringsAsFactors = FALSE
+  )
+}))
+
+combined_lws_dimensions <- tibble::tibble(
+  metric = c("Selected LWS files", "Rows in combined LWS table", "Columns in combined LWS table"),
+  value = c(length(lws_paths), nrow(lws_clean), ncol(lws_clean))
+)
+
+lws_input_audit_path <- fs::path(clean_merge_output_dir, "LWS_Input_Audit.xlsx")
+writexl::write_xlsx(
+  list(
+    Selected_LWS_Files = lws_file_audit,
+    Combined_LWS_Dimensions = combined_lws_dimensions,
+    LWS_Schema_Inventory = lws_schema_inventory
+  ),
+  lws_input_audit_path
+)
+message("LWS input audit workbook written: ", lws_input_audit_path)
+
+suppressWarnings(knitr::kable(
+  lws_file_audit[, c("source_order", "lws_source_file", "rows", "columns")],
+  caption = "Selected LWS input files and source-level dimensions."
+))
+
+suppressWarnings(knitr::kable(
+  combined_lws_dimensions,
+  caption = "Combined LWS dimensions after source-file consolidation."
+))
+```
+
+# 2) Clean Metadata (optional)
+
+Metadata is optional. If no metadata file is available, the notebook continues with the cleaned LWS table only and writes the same final workbook name for QC to use next.
+
+Add metadata when you need study information that is not already in the LWS file, such as disease status, treatment group, patient ID, batch, or another group that will be used for plots, QC checks, or later contrasts. If one metadata file is available, it is cleaned and used for the merge. If several metadata files are available, set `metadata_input_file` so the notebook uses the intended table.
+
+```{r clean-metadata}
+metadata_cleaned_paths <- character(0)
+
+if (!dir.exists(metadata_root)) {
+  # Metadata is optional; keep pipeline running in LWS-only mode.
+  message("Skipping metadata cleaning: Metadata folder does not exist.")
+} else {
+  metadata_paths <- resolve_metadata_input_paths(
+    metadata_root = metadata_root,
+    metadata_cleaned_dir = metadata_cleaned_dir,
+    metadata_input_file = params$metadata_input_file
+  )
+
+  # Continue without metadata rather than failing whole stage.
+  if (length(metadata_paths) == 0) {
+    message("No metadata files (.xlsx/.csv/.txt) found in: ", metadata_root, " | continuing.")
+  } else {
+    metadata_path <- metadata_paths[[1]]
+    message("Selected metadata file: ", basename(metadata_path))
+
+    # Clean the selected metadata file and persist the exact table used for merge.
+    meta_clean <- read_any_tabular_file(metadata_path, lws_mode = FALSE)
+    warn_if_duplicate_rows(meta_clean, basename(metadata_path))
+    warn_if_empty_rows(meta_clean, basename(metadata_path))
+
+    meta_out <- protocol_output_path(
+      metadata_cleaned_dir,
+      paste0(tools::file_path_sans_ext(basename(metadata_path)), "_cleaned.xlsx"),
+      path_limit = portable_path_limit
+    )
+    writexl::write_xlsx(meta_clean, meta_out)
+    metadata_cleaned_paths <- c(metadata_cleaned_paths, meta_out)
+    message("Cleaned metadata written: ", meta_out)
+  }
+}
+```
+
+# 3) Optional merge: LWS + Metadata
+
+If metadata exists, this step attempts to add metadata columns to the LWS table using cleaned link keys.
+
+- If merge key inference fails, the notebook writes the cleaned LWS table only.
+- If merge succeeds, a merge audit workbook is also produced.
+
+::: {.callout-warning}
+## How the merge key is chosen
+The notebook cleans column names before matching. If the original file has `Sample ID` or `Sample_ID`, the cleaned column name is `sample_id`.
+
+**AUTO mode (default):** the notebook looks for a key column **present in both tables**, in this priority order: `histo_number`, `histology_number`, `roi`, `sample_id`, `patient_id`, `roi_number`, `id`. A column shared by both tables is always preferred over a higher-priority column that exists in only one of them — so a shared `sample_id` is chosen even when the LWS also has `roi`. The notebook will **not** silently join two differently named columns (for example LWS `roi` to metadata `patient_id`). If no shared candidate exists, the merge is skipped, the cleaned LWS is still written, and you are asked to set the link columns explicitly.
+
+**Explicit mode:** set `lws_link_column` and/or `metadata_link_column` to the columns to join on. Use the cleaned name if you know it; if you enter an original-style name such as `Sample_ID`, the notebook warns you, converts it to `sample_id`, and checks for that cleaned column. Setting the two sides to different names is allowed (the notebook reports it) for the case where the same identifier legitimately has different column names in each file.
+:::
+
+```{r merge-lws-metadata}
+final_complete_path <- final_stage0_path
+# Companion workbook containing merge diagnostics and unmatched keys.
+merge_audit_path <- file.path(clean_merge_output_dir, "Merge_Audit.xlsx")
+
+# If no metadata available, save cleaned LWS as final object and exit merge path cleanly.
+# Merge stage gracefully degrades to LWS-only output when metadata is absent.
+if (length(metadata_cleaned_paths) == 0) {
+  writexl::write_xlsx(lws_clean, final_complete_path)
+  message("No metadata available. Saved cleaned LWS as final output: ", final_complete_path)
+
+} else {
+  # Use the selected cleaned metadata file for merge.
+  metadata_path_for_merge <- metadata_cleaned_paths[1]
+  # Read cleaned metadata back from disk to mirror the exact merge input.
+  metadata_clean <- readxl::read_xlsx(metadata_path_for_merge)
+
+  # Candidate columns for generic link variable X, in priority order.
+  link_candidates <- c("histo_number", "histology_number", "roi", "sample_id", "patient_id", "roi_number", "id")
+
+  # Choose both merge columns together. In AUTO mode this requires a key column
+  # present in BOTH tables (a shared key beats a higher-priority key that exists
+  # in only one table), so the notebook never silently joins, for example, the
+  # LWS 'roi' column to a metadata 'patient_id' column.
+  join_cols <- choose_join_columns(
+    lws_df = lws_clean,
+    meta_df = metadata_clean,
+    lws_pref = params$lws_link_column,
+    meta_pref = params$metadata_link_column,
+    candidates = link_candidates
+  )
+  lws_link_col <- join_cols$lws
+  meta_link_col <- join_cols$meta
+
+    # If join keys cannot be inferred, publish cleaned LWS and skip join safely.
+  if (is.na(lws_link_col) || is.na(meta_link_col)) {
+    # Soft-fail merge and still provide cleaned LWS output.
+    warning(
+      "Merge skipped: could not infer link column(s). Set params$lws_link_column and params$metadata_link_column explicitly.",
+      call. = FALSE
+    )
+    writexl::write_xlsx(lws_clean, final_complete_path)
+    message("Saved cleaned LWS as fallback final output: ", final_complete_path)
+
+  } else {
+    message("Merging using LWS column '", lws_link_col, "' and metadata column '", meta_link_col, "'.")
+
+    # Build normalized join key on both tables.
+    lws_keyed <- lws_clean %>% dplyr::mutate(link_key = normalise_link_key(.data[[lws_link_col]]))
+    metadata_keyed <- metadata_clean %>% dplyr::mutate(link_key = normalise_link_key(.data[[meta_link_col]]))
+
+    # Rows whose join key is blank/missing (NA) carry no identifier to merge on.
+    # Report them here; the join below uses na_matches = "never" so they are kept
+    # in the LWS output but left unmatched instead of fanning out or colliding.
+    n_lws_missing_key  <- sum(is.na(lws_keyed$link_key))
+    n_meta_missing_key <- sum(is.na(metadata_keyed$link_key))
+    if (n_lws_missing_key > 0 || n_meta_missing_key > 0) {
+      message(glue::glue(
+        "Blank/missing join keys treated as unmatched: {n_lws_missing_key} LWS row(s) (column ",
+        "'{lws_link_col}') and {n_meta_missing_key} metadata row(s) (column '{meta_link_col}') ",
+        "have no key value and will not be merged on."
+      ))
+    }
+
+    # Pre-join audits: duplicate metadata keys and LWS key density.
+    dup_meta <- metadata_keyed %>%
+      dplyr::count(link_key, name = "n_metadata") %>%
+      dplyr::filter(!is.na(link_key) & link_key != "" & n_metadata > 1) %>%
+      dplyr::arrange(dplyr::desc(n_metadata), link_key)
+
+    roi_per_key <- lws_keyed %>%
+      dplyr::count(link_key, name = "n_lws_rows") %>%
+      dplyr::arrange(dplyr::desc(n_lws_rows))
+
+    lws_rows_by_source <- lws_keyed %>%
+      dplyr::count(lws_source_file, name = "n_lws_rows") %>%
+      dplyr::arrange(lws_source_file)
+
+    # Duplicate metadata keys would multiply LWS rows during the join (each LWS
+    # row fanned out across every matching metadata row), silently inflating the
+    # merged table. Require unique metadata keys and fail loudly otherwise.
+    if (nrow(dup_meta) > 0) {
+      stop(
+        "Metadata join key '", meta_link_col, "' has duplicate values, which would ",
+        "multiply LWS rows during the merge. Duplicated keys (n_metadata): ",
+        paste(sprintf("%s (%d)", dup_meta$link_key, dup_meta$n_metadata), collapse = "; "),
+        ". De-duplicate the metadata so each key maps to a single row before merging.",
+        call. = FALSE
+      )
+    }
+
+    # Merge: left join metadata onto LWS. many-to-one keeps every LWS row and
+    # attaches at most one metadata row per key (errors if that is violated).
+    # na_matches = "never" ensures blank/missing keys (NA) never match each other,
+    # so key-less rows on both sides cannot fan out and trip the many-to-one check.
+    merged <- lws_keyed %>%
+      dplyr::left_join(
+        metadata_keyed,
+        by = "link_key",
+        suffix = c("", "_meta"),
+        relationship = "many-to-one",
+        na_matches = "never"
+      )
+
+    # Determine whether metadata columns are populated after join.
+    meta_cols <- setdiff(names(metadata_keyed), "link_key")
+    meta_cols_in_merged <- unique(c(
+      setdiff(meta_cols, names(lws_keyed)),
+      paste0(intersect(meta_cols, names(lws_keyed)), "_meta")
+    ))
+    meta_cols_in_merged <- meta_cols_in_merged[meta_cols_in_merged %in% names(merged)]
+
+    # Compute row-level match status using any non-empty metadata column as signal.
+    if (length(meta_cols_in_merged) > 0) {
+      matched_row <- rowSums(!is.na(merged[, meta_cols_in_merged, drop = FALSE])) > 0
+    } else {
+      matched_row <- rep(FALSE, nrow(merged))
+    }
+
+    total_rows <- nrow(merged)
+    matched_rows <- sum(matched_row)
+    unmatched_rows <- total_rows - matched_rows
+
+    merged_rows_by_source <- merged %>%
+      dplyr::mutate(metadata_match = matched_row) %>%
+      dplyr::group_by(lws_source_file) %>%
+      dplyr::summarise(
+        merged_rows = dplyr::n(),
+        matched_rows = sum(metadata_match, na.rm = TRUE),
+        unmatched_rows = merged_rows - matched_rows,
+        .groups = "drop"
+      ) %>%
+      dplyr::arrange(lws_source_file)
+
+    # Console-friendly summary for quick monitoring.
+    message(glue::glue("--- Merge summary ---"))
+    message(glue::glue("Selected LWS files: {length(lws_paths)}"))
+    message(glue::glue("LWS rows: {nrow(lws_keyed)}"))
+    message(glue::glue("Metadata rows: {nrow(metadata_keyed)}"))
+    message(glue::glue("Merged rows: {total_rows}"))
+    message(glue::glue(
+      "Matched rows: {matched_rows} ({round(100 * matched_rows / max(total_rows, 1), 1)}%)"
+    ))
+    message(glue::glue("Unmatched rows: {unmatched_rows}"))
+
+    # Two-sided reconciliation to identify unmatched keys on both sides.
+    unmatched_lws <- lws_keyed %>%
+      dplyr::filter(!is.na(link_key) & link_key != "") %>%
+      dplyr::anti_join(metadata_keyed %>% dplyr::distinct(link_key), by = "link_key") %>%
+      dplyr::distinct(link_key, .keep_all = TRUE)
+
+    unmatched_metadata <- metadata_keyed %>%
+      dplyr::filter(!is.na(link_key) & link_key != "") %>%
+      dplyr::anti_join(lws_keyed %>% dplyr::distinct(link_key), by = "link_key") %>%
+      dplyr::distinct(link_key, .keep_all = TRUE)
+
+    message(glue::glue("LWS-only keys: {nrow(unmatched_lws)}"))
+    message(glue::glue("Metadata-only keys: {nrow(unmatched_metadata)}"))
+
+    merge_summary <- data.frame(
+      metric = c("selected_lws_files", "lws_rows", "metadata_rows", "merged_rows", "matched_rows", "unmatched_rows", "lws_only_keys", "metadata_only_keys", "metadata_duplicate_keys"),
+      value = c(length(lws_paths), nrow(lws_keyed), nrow(metadata_keyed), total_rows, matched_rows, unmatched_rows, nrow(unmatched_lws), nrow(unmatched_metadata), nrow(dup_meta)),
+      stringsAsFactors = FALSE
+    )
+
+    # Save merged output and companion audit workbook.
+    writexl::write_xlsx(merged, final_complete_path)
+    writexl::write_xlsx(
+      list(
+        Merge_Summary = merge_summary,
+        LWS_only_keys = unmatched_lws,
+        Metadata_only_keys = unmatched_metadata,
+        Metadata_Duplicate_Keys = dup_meta,
+        LWS_rows_by_source = lws_rows_by_source,
+        Merged_rows_by_source = merged_rows_by_source,
+        LWS_rows_per_key = head(roi_per_key, 500)
+      ),
+      merge_audit_path
+    )
+
+    message("Final merged output written: ", final_complete_path)
+    message("Merge audit workbook written: ", merge_audit_path)
+  }
+}
+```
+
+# Final QA summary
+
+This final code section reports the cleaned LWS table size and column names so users can confirm the import before continuing to QC.
+
+```{r qa-summary}
+#| warning: false
+qa_dimension_table <- tibble::tibble(
+  metric = c("Selected LWS files", "Rows in combined cleaned LWS table", "Columns in combined cleaned LWS table"),
+  value = c(length(lws_paths), nrow(lws_clean), ncol(lws_clean))
+)
+
+suppressWarnings(knitr::kable(
+  qa_dimension_table,
+  caption = "Combined cleaned LWS table dimensions after source-file consolidation."
+))
+
+suppressWarnings(knitr::kable(
+  tibble::tibble(column_name = names(lws_clean)),
+  caption = "Combined cleaned LWS column inventory for QC mapping in stage 1."
+))
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
+:::

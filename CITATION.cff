@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+title: "A parameterized NanoString GeoMx analysis pipeline"
+authors:
+  - family-names: Thompson
+    given-names: Matthew
+  - family-names: Johnson
+    given-names: Emily
+  - family-names: Ecclestone
+    given-names: Gabrielle B.
+  - family-names: Edmondson
+    given-names: Jack A.
+  - family-names: Saur
+    given-names: Dieter
+  - family-names: Walsh
+    given-names: Naomi
+  - family-names: Jamieson
+    given-names: Nigel B.
+  - family-names: Costello
+    given-names: Eithne
+  - family-names: Soul
+    given-names: Jamie
+repository-code: "https://github.com/Matty-UoL/A-parameterized-NanoString-GeoMx-Analysis-Pipeline"
+version: 1.0.1
+date-released: 2026-07-23
+doi: 10.5281/zenodo.21163241
+license: CC-BY-4.0

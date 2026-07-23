@@ -1,0 +1,27 @@
+# R
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+
+# Quarto
+/.quarto/
+
+# Local pipeline runs on your own data (the shipped Example_Dataset/Outputs is kept intentionally)
+/Outputs/
+**/Cleaned/
+rawdata/
+
+# OS / editor / Office temp files
+.DS_Store
+Thumbs.db
+~$*
+
+# Agent working directories. These can contain git worktrees holding full copies
+# of earlier revisions, so they must never be swept into a commit or an archive.
+/.claude/
+
+# VennDiagram writes a timestamped log beside each plot it renders.
+*.png.*.log

@@ -1,0 +1,3 @@
+factor	numerator	denominator
+Annotation	Acinar_Tumor	Acinar_Healthy
+Annotation	Duct_Tumor	Duct_Healthy

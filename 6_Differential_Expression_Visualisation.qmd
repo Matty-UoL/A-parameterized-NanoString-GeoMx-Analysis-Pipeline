@@ -1,0 +1,3815 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "6 Differential Expression Visualisation"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+
+params:
+
+  # Project paths and shared folders
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+  dir_outputs: "Outputs"
+  dir_src: "src"
+
+  # Differential-expression stage read by this notebook
+  de_calc_stage: "5_DE"
+  de_calc_results_dir: "results"
+  de_calc_results_subdir: "de"
+  # Stage 5 tables subdirectory (where contrast_table_expanded.tsv is written).
+  # Kept as a Stage-5-scoped param so it does not silently couple to this stage's
+  # own out_tables name.
+  de_calc_tables: "tables"
+  # Metadata column used by Stage 5 to define DE contrast groups. Keep this
+  # aligned with 5_Differential_Expression_Calculation.qmd so selected-contrast
+  # gene panels can reconstruct the numerator and denominator sample groups.
+  contrast_factor: "Annotation"
+
+  # Normalisation-stage objects used for heatmap and gene-level figures.
+  # These are read only; this notebook does not refit DE models.
+  norm_stage: "3_Norm"
+  norm_results_dir: "results"
+  norm_rds: "normalised_spatial_data.RDS"
+  norm_geodiff_rds: "GeoDiff_normalised_spatial_data.RDS"
+  norm_tmm_rds: "TMM_normalised_spatial_data.RDS"
+  expression_assay: "normmat"
+
+  # This stage output structure
+  out_stage: "6_DE_Vis"
+  out_results: "results"
+  out_tables: "tables"
+  out_figures: "figures"
+  de_output_subdir: "de"
+
+  # Differential-expression thresholds used for comparison summaries
+  adj_p_cutoff: 0.05
+  logFC_cutoff: 0.58            # Approximately 1.5-fold on the linear fold-change scale.
+
+  # Figure controls
+  seed: 123
+  volcano_point_size: 0.3       # Point size used in all primary and fallback volcano panels.
+  fig_width_standard: 10
+  fig_height_standard: 6
+  fig_width_wide: 12
+  fig_height_wide: 7
+  fig_width_grid: 18
+  fig_height_grid: 10
+
+  # Heatmap typography. Increase these values for denser figures or high-resolution
+  # publication output; all values must be finite numbers greater than zero.
+  expression_heatmap_base_font_size: 9
+  expression_heatmap_label_font_size: 7
+  correlation_heatmap_base_font_size: 10
+  correlation_heatmap_axis_font_size: 5
+  correlation_heatmap_cell_font_size: 2.4
+
+  # Core DE visualisation controls.
+  # Core figures always attempt to run from stage 5 result objects and earlier
+  # normalised expression objects. If too few genes/samples are available for a
+  # method, that individual figure is reported as skipped in the visualisation checklist.
+  top_genes_per_volcano: 5
+
+  # Maximum number of top-ranked significant genes drawn in the broad
+  # method-family heatmaps. These genes are selected from stage 5 DE result
+  # tables and ranked across contrasts by adjusted P-value support and absolute
+  # log fold-change.
+  core_heatmap_max_genes: 25
+
+  # Selected-method deep-dive controls.
+  #
+  # selected_de_method must be one of the five stage 5 method result objects:
+  #   - "dream_GeoDiffCounts"
+  #   - "limma_voom_TMM"
+  #   - "limma_voom_GeoDiff" (GeoDiff-filtered count input)
+  #   - "limma_trend_Q3"
+  #   - "limma_trend_GeoDiff"
+  #
+  # The default follows the recommended protocol route, but users should confirm
+  # this choice using the comparison sections in this notebook.
+  selected_de_method: "limma_trend_GeoDiff"
+
+  # Leave blank to use all contrasts available in selected_de_method. Provide
+  # exact contrast names only when you want to draw a smaller contrast set chosen in advance.
+  selected_contrasts:
+    value: []
+
+  # Optional regular expression used to restrict the focused heatmap and
+  # segment-filtered boxplots to matching segment labels. Leave blank to use all
+  # matched samples and automatic segment inference from contrast names.
+  selected_segment_regex: ""
+  selected_heatmap_adj_p_cutoff: 0.01
+
+  # Maximum number of top-ranked genes drawn in each focused selected-contrast
+  # heatmap. Decrease this value for smaller heatmaps or increase it when a
+  # broader contrast-level expression review is needed.
+  heatmap_max_genes: 10
+
+  # Number of top-ranked genes to draw per selected contrast. Genes are ranked
+  # by adjusted P-value first and absolute log fold-change second.
+  top_n_genes: 10
+
+  # Metadata mapping for heatmap and gene-panel annotations.
+  # Edit these when adapting the protocol to a dataset with different metadata
+  # column names.
+  col_slide: "slide_name"
+  col_patient: "patient_id"
+  col_disease_status: "disease_status"
+  col_cell_type: "cell_type"
+  col_segment: "segment"
+  stain_regex_override: ""
+
+  # Boxplot grouping for the selected-method top-gene panels.
+  # x-axis = the cell-type groups the one-vs-rest contrasts compare, so each
+  # segment panel keeps >= 2 groups and renders. (disease_status is single-valued
+  # within most segments in this dataset, which is why the previous default caused
+  # every segment tab to be skipped.) Points are coloured by disease_status so the
+  # recovered Tumour/Healthy split stays visible within each cell type.
+  boxplot_x_col: "cell_type"
+  boxplot_color_col: "disease_status"
+  boxplot_facet_col: ""
+  facet_ncol: 4
+
+  # Per-segment tab strip in the top-gene boxplot panels.
+  #   "auto"  (default): show per-segment tabs only when the segment column is
+  #            genuinely distinct from the contrast/grouping axis. If your project
+  #            uses one combined annotation column for both cell type and segment
+  #            (set col_segment and col_cell_type to that same column), the
+  #            redundant per-segment strip is suppressed automatically and only the
+  #            "All matched samples" panel is shown.
+  #   "always": previous behaviour (always emit the per-segment tab strip).
+  #   "never":  only ever show the "All matched samples" panel.
+  boxplot_segment_tabs: "auto"
+---
+
+<style>
+:root {
+  --bs-body-font-family: "Segoe UI", Arial, sans-serif;
+  --bs-font-sans-serif: "Segoe UI", Arial, sans-serif;
+  --bs-font-monospace: "Segoe UI", Arial, sans-serif;
+}
+
+html,
+body,
+body *:not(svg):not(path),
+button,
+input,
+select,
+textarea,
+caption,
+figcaption,
+main,
+.content,
+.quarto-title-block,
+.quarto-title,
+.quarto-title-meta,
+.sidebar,
+.toc-active,
+.nav-page,
+.callout,
+.callout-title,
+.callout-body,
+.cell,
+.cell-output,
+.cell-output-display,
+.table,
+table,
+table *,
+.dataTable,
+.dataTable *,
+.dataTables_wrapper,
+.dataTables_wrapper *,
+.html-widget,
+.html-widget *,
+.sourceCode,
+pre,
+code,
+kbd,
+samp,
+svg text {
+  font-family: "Segoe UI", Arial, sans-serif !important;
+}
+
+.cell-output-display,
+.dataTables_wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+table,
+table:not(.dataTable) {
+  width: 100% !important;
+}
+
+td,
+th {
+  vertical-align: top;
+}
+
+.dataTables_wrapper table.dataTable,
+.dataTables_wrapper .dataTable {
+  width: max-content !important;
+  min-width: 100% !important;
+}
+
+.dataTables_wrapper th,
+.dataTable td,
+.dataTables_wrapper td {
+  vertical-align: top;
+  white-space: nowrap !important;
+  overflow-wrap: normal;
+  word-break: normal;
+  min-width: 10rem;
+}
+
+.dataTables_wrapper th {
+  font-weight: 600;
+}
+
+.dataTables_wrapper .dataTables_scrollBody {
+  border-bottom: 1px solid #ddd;
+}
+
+.protocol-figure-note {
+  color: #555;
+  font-size: 0.95rem;
+  margin-top: -0.5rem;
+}
+</style>
+
+# Differential expression visualisation (6)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook is the visualisation and comparison component of the differential-expression workflow. It reads model outputs generated by `5_Differential_Expression_Calculation.qmd` and produces interpretation figures, cross-method comparison summaries, and selected-method gene-level checks.
+
+It visualises outputs from the protocol-supported DE methods in stage 5 (`limma-trend`, `limma-voom`, and `dream`) without re-fitting any statistical models.
+
+In the recommended protocol path, `limma_trend_GeoDiff` is the default selected method for detailed inspection. This remains a YAML-controlled user decision and should be confirmed using the method inventories, volcano plots, heatmaps, correlation summaries, and gene-level panels in this notebook. Method labels preserve the Stage 5 distinction: `limma_voom_GeoDiff` is the GeoDiff-filtered count-data branch, while `limma_trend_GeoDiff` is the GeoDiff-normalized `normmat` branch.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+::: {.callout-caution collapse="true"}
+## Reproducibility checkpoint
+When adapting this notebook, record all run parameters and decisions, including selected method combinations, thresholds, visual checks, and final model choice, so results remain traceable for publication.
+:::
+
+::: {.callout-note collapse="true"}
+## YAML parameter order guide (6)
+To keep this notebook aligned with the rest of the protocol, parameters are grouped in execution order:
+
+1. Project/shared paths.
+2. Input locations from earlier stages.
+3. This stage output locations.
+4. Thresholds and figure controls.
+5. Selected-method and selected-contrast controls.
+6. Metadata mapping and boxplot grouping.
+:::
+
+::: {.callout-tip collapse="true"}
+## How to use `stain_regex_override`
+`stain_regex_override` controls the stain or segment pattern passed to `DEResPlot()` when this notebook builds differential-expression summary panels. These panels use the pattern to group or facet DE results by segment identity when that helper is available.
+
+For most datasets, leave this value blank:
+
+```yaml
+stain_regex_override: ""
+```
+
+When left blank, the notebook reads the observed labels from the configured segment metadata column and builds a regular-expression pattern automatically. Set this value manually only when the automatic pattern is not appropriate. For example, if the metadata contains extra segment labels such as `Background` or `NegativeControl`, but the protocol comparison should only show biological compartments, use:
+
+```yaml
+stain_regex_override: "CD45|CD31|PanCK|Stroma"
+```
+
+The `|` character means "or" in a regular expression. Match the spelling, capitalization, and punctuation used in your segment metadata column.
+:::
+
+::: {.callout-caution collapse="true"}
+## Model choice decision
+This notebook provides evidence for model choice but does not automatically select a "best" model. Record the method, contrast set, segment filter, and reasoning you plan to carry into pathway enrichment.
+:::
+
+## Load libraries
+
+```{r}
+#| output: false
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(fs)
+library(glue)
+library(knitr)
+library(DT)
+library(ggplot2)
+library(ggcorrplot)
+library(cowplot)
+library(pheatmap)
+library(NanoStringNCTools)
+library(GeomxTools)
+library(SummarizedExperiment)
+library(Biobase)
+
+set.seed(params$seed)
+
+protocol_font_family <- "Segoe UI"
+if (.Platform$OS.type == "windows") {
+  try(
+    do.call(
+      grDevices::windowsFonts,
+      stats::setNames(
+        list(grDevices::windowsFont(protocol_font_family)),
+        protocol_font_family
+      )
+    ),
+    silent = TRUE
+  )
+}
+
+protocol_pdf_device <- if (isTRUE(capabilities("cairo"))) {
+  grDevices::cairo_pdf
+} else {
+  grDevices::pdf
+}
+
+ggplot2::theme_set(ggplot2::theme_minimal(base_family = protocol_font_family))
+```
+
+## Path setup and helper utilities
+
+```{r}
+#| label: setup-paths
+#| message: false
+#| warning: false
+
+resolve_project_root <- function(project_root_param) {
+  root <- project_root_param
+  if (is.null(root) || length(root) == 0 || is.na(root[[1]])) {
+    root <- "."
+  }
+  root <- trimws(as.character(root[[1]]))
+
+  if (!nzchar(root) || identical(root, ".")) {
+    if (requireNamespace("here", quietly = TRUE)) {
+      return(fs::path_abs(here::here()))
+    }
+    return(fs::path_abs("."))
+  }
+
+  fs::path_abs(fs::path_expand(root))
+}
+
+project_root <- resolve_project_root(params$project_root)
+root_via_here <- if (requireNamespace("here", quietly = TRUE)) {
+  fs::path_abs(here::here())
+} else {
+  fs::path_abs(".")
+}
+
+path_proj <- function(...) {
+  if (identical(project_root, root_via_here) && requireNamespace("here", quietly = TRUE)) {
+    return(fs::path_norm(here::here(...)))
+  }
+  fs::path_norm(fs::path(project_root, ...))
+}
+
+dir_src <- path_proj(params$dir_src)
+path_utilities_path <- fs::path(dir_src, "pathUtilities.R")
+if (!file.exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+
+de_5a_preferred <- path_proj(
+  params$dir_outputs,
+  params$de_calc_stage,
+  params$de_calc_results_dir,
+  params$de_calc_results_subdir
+)
+de_5a_legacy <- path_proj(
+  params$dir_outputs,
+  params$de_calc_stage,
+  params$de_calc_results_dir,
+  "differential_expression"
+)
+de_5a_dir <- protocol_resolve_input_dir(
+  de_5a_preferred,
+  de_5a_legacy,
+  label = "Stage 5 differential-expression result directory"
+)
+
+norm_dir <- path_proj(params$dir_outputs, params$norm_stage, params$norm_results_dir)
+norm_input_path <- fs::path(norm_dir, params$norm_rds)
+norm_geodiff_input_path <- fs::path(norm_dir, params$norm_geodiff_rds)
+norm_tmm_input_path <- fs::path(norm_dir, params$norm_tmm_rds)
+
+out_base <- path_proj(params$dir_outputs, params$out_stage)
+out_results <- fs::path(out_base, params$out_results)
+out_tables <- fs::path(out_base, params$out_tables)
+out_figures <- fs::path(out_base, params$out_figures)
+out_results_de <- fs::path(out_results, params$de_output_subdir)
+out_figures_de <- fs::path(out_figures, params$de_output_subdir)
+out_figures_top_all <- fs::path(out_figures_de, "top", "all")
+out_figures_top_segment <- fs::path(out_figures_de, "top", "segment")
+
+stage6_path_audit <- protocol_path_audit(
+  c(
+    "Stage 5 DE input" = de_5a_dir,
+    "Q3 normalized input" = norm_input_path,
+    "Stage 6 result directory" = out_results_de,
+    "Stage 6 deepest figure path" = fs::path(out_figures_top_segment, "plot_00000000.png")
+  ),
+  portable_path_limit
+)
+protocol_assert_audit(stage6_path_audit, portable_path_limit)
+knitr::kable(stage6_path_audit, caption = "Stage 6 path-portability check")
+
+purrr::walk(
+  c(
+    out_results_de,
+    out_tables,
+    out_figures_de,
+    out_figures_top_all,
+    out_figures_top_segment
+  ),
+  fs::dir_create,
+  recurse = TRUE
+)
+
+message(sprintf("Using project root: %s", project_root))
+message(sprintf("Reading stage 5 DE outputs from: %s", de_5a_dir))
+message(sprintf("Writing stage 6 visualisation outputs to: %s", out_base))
+
+utility_functions_path <- fs::path(dir_src, "utilityFunctions.R")
+if (file.exists(utility_functions_path)) {
+  source(utility_functions_path)
+} else {
+  warning(
+    "utilityFunctions.R was not found at: ", utility_functions_path,
+    ". Set params$project_root to the project root and params$dir_src to the helper directory name, usually 'src'. ",
+    "DEResPlot and plotVolcano fallbacks will be used where needed."
+  )
+}
+
+volcano_adj_p_cutoff <- suppressWarnings(as.numeric(params$adj_p_cutoff))
+volcano_logfc_cutoff <- suppressWarnings(as.numeric(params$logFC_cutoff))
+volcano_point_size <- suppressWarnings(as.numeric(params$volcano_point_size))
+
+validate_positive_numeric_param <- function(value, parameter_name) {
+  numeric_value <- suppressWarnings(as.numeric(value))
+  if (length(numeric_value) != 1L || !is.finite(numeric_value) || numeric_value <= 0) {
+    stop(paste0("params$", parameter_name, " must be one finite number greater than 0."))
+  }
+  numeric_value
+}
+
+expression_heatmap_base_font_size <- validate_positive_numeric_param(
+  params$expression_heatmap_base_font_size,
+  "expression_heatmap_base_font_size"
+)
+expression_heatmap_label_font_size <- validate_positive_numeric_param(
+  params$expression_heatmap_label_font_size,
+  "expression_heatmap_label_font_size"
+)
+correlation_heatmap_base_font_size <- validate_positive_numeric_param(params$correlation_heatmap_base_font_size, "correlation_heatmap_base_font_size")
+correlation_heatmap_axis_font_size <- validate_positive_numeric_param(params$correlation_heatmap_axis_font_size, "correlation_heatmap_axis_font_size")
+correlation_heatmap_cell_font_size <- validate_positive_numeric_param(params$correlation_heatmap_cell_font_size, "correlation_heatmap_cell_font_size")
+
+if (length(volcano_adj_p_cutoff) != 1L || !is.finite(volcano_adj_p_cutoff) ||
+    volcano_adj_p_cutoff <= 0 || volcano_adj_p_cutoff >= 1) {
+  stop("params$adj_p_cutoff must be one finite number between 0 and 1.")
+}
+if (length(volcano_logfc_cutoff) != 1L || !is.finite(volcano_logfc_cutoff) ||
+    volcano_logfc_cutoff < 0) {
+  stop("params$logFC_cutoff must be one finite, non-negative number.")
+}
+if (length(volcano_point_size) != 1L || !is.finite(volcano_point_size) ||
+    volcano_point_size <= 0) {
+  stop("params$volcano_point_size must be one finite number greater than 0.")
+}
+
+volcano_adj_p_label <- format(volcano_adj_p_cutoff, scientific = FALSE, trim = TRUE)
+volcano_logfc_label <- format(volcano_logfc_cutoff, scientific = FALSE, trim = TRUE)
+volcano_fold_change_label <- format(
+  round(2^volcano_logfc_cutoff, digits = 1),
+  scientific = FALSE,
+  trim = TRUE
+)
+volcano_threshold_explanation <- glue::glue(
+  "Red points are significantly up-regulated genes and blue points are significantly ",
+  "down-regulated genes; both colors identify genes with adjusted P-value < ",
+  "{volcano_adj_p_label} and absolute log2 fold change > {volcano_logfc_label} ",
+  "(approximately {volcano_fold_change_label}-fold). Black points do not pass both ",
+  "criteria. The vertical dashed lines mark the positive and negative log2 fold-change ",
+  "cutoffs, and the horizontal dashed line marks the adjusted P-value cutoff."
+)
+
+emit_markdown <- function(text) {
+  text <- as.character(text)
+  if (!stringr::str_detect(text, "\n$")) {
+    text <- paste0(text, "\n")
+  }
+  cat(text)
+  invisible(text)
+}
+
+.stage6_table_counter <- 0L
+.stage6_figure_counter <- 0L
+
+numbered_table_caption <- function(caption) {
+  caption <- stringr::str_squish(as.character(caption))
+  if (stringr::str_detect(caption, "^Table\\s+\\d+\\.")) {
+    return(caption)
+  }
+  .stage6_table_counter <<- .stage6_table_counter + 1L
+  glue::glue("Table {.stage6_table_counter}. {caption}")
+}
+
+numbered_figure_caption <- function(caption) {
+  caption <- stringr::str_squish(as.character(caption))
+  if (stringr::str_detect(caption, "^Figure\\s+\\d+\\.")) {
+    return(caption)
+  }
+  .stage6_figure_counter <<- .stage6_figure_counter + 1L
+  glue::glue("Figure {.stage6_figure_counter}. {caption}")
+}
+
+protocol_datatable <- function(tbl,
+                               caption,
+                               page_length = 10,
+                               scroll_y = NULL,
+                               filter = "none") {
+  options <- list(
+    scrollX = TRUE,
+    pageLength = page_length,
+    autoWidth = FALSE,
+    scrollCollapse = TRUE,
+    dom = "lfrtip",
+    columnDefs = list(
+      list(className = "dt-left", targets = "_all"),
+      list(width = "12rem", targets = "_all")
+    )
+  )
+  if (!is.null(scroll_y)) {
+    options$scrollY <- scroll_y
+  }
+
+  DT::datatable(
+    tbl,
+    rownames = FALSE,
+    filter = filter,
+    class = "compact stripe hover cell-border nowrap",
+    options = options,
+    caption = numbered_table_caption(caption)
+  )
+}
+
+first_display_image <- function(output_file) {
+  files <- as.character(unname(output_file))
+  files <- files[!is.na(files) & nzchar(files)]
+  image_files <- files[stringr::str_detect(tolower(files), "\\.(png|jpe?g|svg)$")]
+  if (length(image_files) == 0) {
+    return(NA_character_)
+  }
+  image_files[[1]]
+}
+
+display_saved_figure <- function(output_file, caption) {
+  image_file <- first_display_image(output_file)
+  if (is.na(image_file) || !file.exists(image_file)) {
+    return(invisible(FALSE))
+  }
+
+  image_src <- fs::path_abs(image_file)
+  image_src <- gsub("\\\\", "/", image_src)
+  caption <- numbered_figure_caption(caption)
+  caption <- stringr::str_squish(as.character(caption))
+  emit_markdown(glue::glue("\n\n![{caption}](<{image_src}>)\n\n"))
+  invisible(TRUE)
+}
+```
+
+```{r}
+#| label: run-parameter-summary
+#| results: asis
+#| warning: false
+
+run_parameter_summary <- tibble::tribble(
+  ~parameter, ~value,
+  "Stage 5 source stage", params$de_calc_stage,
+  "Stage 6 output stage", params$out_stage,
+  "Adjusted P-value cutoff", as.character(params$adj_p_cutoff),
+  "Absolute logFC cutoff", as.character(params$logFC_cutoff),
+  "Volcano point size", as.character(params$volcano_point_size),
+  "DE summary panels", "always attempted",
+  "Volcano grids", "always attempted",
+  "Heatmaps", "always attempted",
+  "Core method-family heatmap max genes", as.character(params$core_heatmap_max_genes),
+  "Expression heatmap base font size", as.character(expression_heatmap_base_font_size),
+  "Expression heatmap row/column font size", as.character(expression_heatmap_label_font_size),
+  "Correlation heatmap base font size", as.character(correlation_heatmap_base_font_size),
+  "Correlation heatmap axis font size", as.character(correlation_heatmap_axis_font_size),
+  "Correlation heatmap cell font size", as.character(correlation_heatmap_cell_font_size),
+  "Method correlation summaries", "always attempted",
+  "Venn/UpSet outputs", "always attempted when enough methods have DE genes",
+  "Selected method for detailed inspection", params$selected_de_method,
+  "Selected contrasts", ifelse(length(unlist(params$selected_contrasts, use.names = FALSE)) > 0, paste(unlist(params$selected_contrasts, use.names = FALSE), collapse = "; "), "<all contrasts in selected method>"),
+  "Selected segment regex", ifelse(nzchar(params$selected_segment_regex), params$selected_segment_regex, "<all segments / infer from contrast>"),
+  "Selected heatmap adjusted P-value cutoff", as.character(params$selected_heatmap_adj_p_cutoff),
+  "Selected heatmap max genes", as.character(params$heatmap_max_genes),
+  "Top DE genes plotted per selected contrast", as.character(params$top_n_genes),
+  "Top-gene boxplot x-axis column", ifelse(nzchar(params$boxplot_x_col), params$boxplot_x_col, params$col_disease_status),
+  "Top-gene boxplot color column", ifelse(nzchar(params$boxplot_color_col), params$boxplot_color_col, params$col_disease_status),
+  "Top-gene boxplot facet column", ifelse(nzchar(params$boxplot_facet_col), params$boxplot_facet_col, "<none>"),
+  "Top-gene per-segment tabs", ifelse(!is.null(params$boxplot_segment_tabs) && nzchar(trimws(as.character(params$boxplot_segment_tabs))), tolower(trimws(as.character(params$boxplot_segment_tabs))), "auto"),
+  "DEResPlot stain regex override", ifelse(nzchar(params$stain_regex_override), params$stain_regex_override, "<auto from segment metadata>")
+)
+
+protocol_datatable(
+  run_parameter_summary,
+  caption = "Stage 6 settings used for this render",
+  page_length = nrow(run_parameter_summary)
+)
+```
+
+## Helper functions
+
+```{r}
+#| label: helper-functions
+
+standardise_de_table <- function(tbl) {
+  if (is.null(tbl) || !is.data.frame(tbl)) {
+    return(NULL)
+  }
+
+  out <- as.data.frame(tbl)
+  if (!"gene" %in% names(out)) {
+    out <- tibble::rownames_to_column(out, var = "gene")
+  }
+
+  if ("log2FC" %in% names(out) && !"logFC" %in% names(out)) {
+    names(out)[names(out) == "log2FC"] <- "logFC"
+  }
+  if ("adjp" %in% names(out) && !"adj.P.Val" %in% names(out)) {
+    names(out)[names(out) == "adjp"] <- "adj.P.Val"
+  }
+  if ("pvalue" %in% names(out) && !"P.Value" %in% names(out)) {
+    names(out)[names(out) == "pvalue"] <- "P.Value"
+  }
+  if (!"P.Value" %in% names(out) && "adj.P.Val" %in% names(out)) {
+    out$P.Value <- out$adj.P.Val
+  }
+
+  out %>%
+    dplyr::mutate(
+      gene = as.character(.data$gene),
+      logFC = if ("logFC" %in% names(.)) suppressWarnings(as.numeric(.data$logFC)) else NA_real_,
+      adj.P.Val = if ("adj.P.Val" %in% names(.)) suppressWarnings(as.numeric(.data$adj.P.Val)) else NA_real_,
+      P.Value = if ("P.Value" %in% names(.)) suppressWarnings(as.numeric(.data$P.Value)) else NA_real_
+    ) %>%
+    dplyr::filter(!is.na(.data$gene), nzchar(.data$gene))
+}
+
+get_sig_genes <- function(tbl, adj_p_cutoff = params$adj_p_cutoff, logfc_cutoff = params$logFC_cutoff) {
+  clean_tbl <- standardise_de_table(tbl)
+  if (is.null(clean_tbl) || !"adj.P.Val" %in% names(clean_tbl) || !"logFC" %in% names(clean_tbl)) {
+    return(character())
+  }
+
+  clean_tbl %>%
+    dplyr::filter(
+      is.finite(.data$adj.P.Val),
+      is.finite(.data$logFC),
+      .data$adj.P.Val < adj_p_cutoff,
+      abs(.data$logFC) > logfc_cutoff
+    ) %>%
+    dplyr::pull(.data$gene) %>%
+    unique()
+}
+
+method_contrast_summary <- function(method_results) {
+  purrr::imap_dfr(method_results, function(contrast_list, method_name) {
+    purrr::imap_dfr(contrast_list, function(tbl, contrast_name) {
+      clean_tbl <- standardise_de_table(tbl)
+      if (is.null(clean_tbl)) {
+        return(tibble::tibble(
+          method_name = method_name,
+          contrast = contrast_name,
+          n_genes = 0L,
+          n_significant = 0L,
+          n_up = 0L,
+          n_down = 0L,
+          min_adj_p = NA_real_,
+          has_logFC = FALSE,
+          has_adj_p = FALSE
+        ))
+      }
+
+      sig_tbl <- clean_tbl %>%
+        dplyr::filter(
+          is.finite(.data$adj.P.Val),
+          is.finite(.data$logFC),
+          .data$adj.P.Val < params$adj_p_cutoff,
+          abs(.data$logFC) > params$logFC_cutoff
+        )
+
+      tibble::tibble(
+        method_name = method_name,
+        contrast = contrast_name,
+        n_genes = nrow(clean_tbl),
+        n_significant = nrow(sig_tbl),
+        n_up = sum(sig_tbl$logFC > 0, na.rm = TRUE),
+        n_down = sum(sig_tbl$logFC < 0, na.rm = TRUE),
+        min_adj_p = suppressWarnings(min(clean_tbl$adj.P.Val, na.rm = TRUE)),
+        has_logFC = any(is.finite(clean_tbl$logFC)),
+        has_adj_p = any(is.finite(clean_tbl$adj.P.Val))
+      )
+    })
+  }) %>%
+    dplyr::mutate(min_adj_p = dplyr::if_else(is.infinite(.data$min_adj_p), NA_real_, .data$min_adj_p))
+}
+
+build_method_metric_df <- function(method_results, value_col) {
+  if (is.null(method_results) || length(method_results) == 0) {
+    return(data.frame())
+  }
+
+  metric_vectors <- list()
+  union_genes <- character(0)
+  skipped <- character(0)
+
+  for (method_name in names(method_results)) {
+    method_tbls <- method_results[[method_name]]
+    if (is.null(method_tbls) || length(method_tbls) == 0) {
+      next
+    }
+
+    for (contrast_name in names(method_tbls)) {
+      clean_tbl <- standardise_de_table(method_tbls[[contrast_name]])
+      key <- paste(method_name, contrast_name, sep = "__")
+
+      if (is.null(clean_tbl) || !value_col %in% names(clean_tbl)) {
+        skipped <- c(skipped, key)
+        next
+      }
+
+      metric_tbl <- clean_tbl %>%
+        dplyr::filter(!duplicated(.data$gene)) %>%
+        dplyr::mutate(metric_value = suppressWarnings(as.numeric(.data[[value_col]])))
+
+      values <- metric_tbl$metric_value
+      names(values) <- metric_tbl$gene
+
+      metric_vectors[[key]] <- values
+      union_genes <- union(union_genes, metric_tbl$gene)
+    }
+  }
+
+  if (length(metric_vectors) == 0 || length(union_genes) == 0) {
+    return(data.frame())
+  }
+
+  if (length(skipped) > 0) {
+    message(
+      "Skipped ", length(skipped), " method-contrast table(s) lacking '",
+      value_col, "': ", paste(skipped, collapse = ", ")
+    )
+  }
+
+  metric_df <- as.data.frame(
+    lapply(metric_vectors, function(v) {
+      out <- rep(NA_real_, length(union_genes))
+      names(out) <- union_genes
+      out[names(v)] <- v
+      out
+    }),
+    check.names = FALSE
+  )
+
+  rownames(metric_df) <- union_genes
+  metric_df
+}
+
+getFoldChangesDF <- function(method_results) {
+  build_method_metric_df(method_results, value_col = "logFC")
+}
+
+getPvalsDF <- function(method_results) {
+  build_method_metric_df(method_results, value_col = "adj.P.Val")
+}
+
+sanitize_for_correlation <- function(df_like, use = "pairwise.complete.obs") {
+  if (is.null(df_like) || ncol(df_like) < 2) {
+    return(NULL)
+  }
+
+  x <- as.data.frame(df_like, check.names = FALSE)
+  numeric_cols <- vapply(x, is.numeric, logical(1))
+  x <- x[, numeric_cols, drop = FALSE]
+  if (ncol(x) < 2) {
+    return(NULL)
+  }
+
+  min_obs_ok <- vapply(x, function(v) sum(is.finite(v)) >= 2, logical(1))
+  x <- x[, min_obs_ok, drop = FALSE]
+  if (ncol(x) < 2) {
+    return(NULL)
+  }
+
+  has_variation <- vapply(
+    x,
+    function(v) {
+      vv <- v[is.finite(v)]
+      length(vv) >= 2 && stats::var(vv) > 0
+    },
+    logical(1)
+  )
+  x <- x[, has_variation, drop = FALSE]
+  if (ncol(x) < 2) {
+    return(NULL)
+  }
+
+  cor_mat <- suppressWarnings(stats::cor(as.matrix(x), use = use))
+  if (is.null(cor_mat) || ncol(cor_mat) < 2) {
+    return(NULL)
+  }
+
+  finite_cols <- apply(cor_mat, 2, function(v) all(is.finite(v)))
+  cor_mat <- cor_mat[finite_cols, finite_cols, drop = FALSE]
+  if (ncol(cor_mat) < 2) {
+    return(NULL)
+  }
+
+  cor_mat
+}
+
+format_correlation_labels <- function(cor_mat) {
+  label_one <- function(x) {
+    parts <- stringr::str_split_fixed(as.character(x), "__", n = 2)
+    method_label <- parts[, 1] %>%
+      gsub("OneVsRest", "", ., fixed = TRUE) %>%
+      stringr::str_replace_all("_", " ")
+    contrast_label <- parts[, 2] %>%
+      gsub("OneVsRest", "", ., fixed = TRUE) %>%
+      stringr::str_replace_all("_", " ") %>%
+      stringr::str_squish() %>%
+      stringr::str_trunc(width = 46, side = "right") %>%
+      stringr::str_wrap(width = 18)
+
+    ifelse(
+      nzchar(contrast_label),
+      paste(method_label, contrast_label, sep = "\n"),
+      stringr::str_wrap(method_label, width = 18)
+    )
+  }
+
+  dimnames(cor_mat) <- lapply(dimnames(cor_mat), function(x) make.unique(label_one(x), sep = "\n"))
+  cor_mat
+}
+
+plot_correlation_heatmap <- function(df_like, title, out_path, transform_fn = identity) {
+  transformed <- transform_fn(df_like)
+  cor_mat <- sanitize_for_correlation(transformed, use = "pairwise.complete.obs")
+
+  if (is.null(cor_mat)) {
+    message("Skipping correlation heatmap ('", title, "'): insufficient finite overlap across methods.")
+    return(FALSE)
+  }
+
+  cor_mat <- format_correlation_labels(cor_mat)
+  p <- suppressWarnings(
+    ggcorrplot::ggcorrplot(
+      cor_mat,
+      hc.order = TRUE,
+      type = "full",
+      lab = TRUE,
+      lab_size = correlation_heatmap_cell_font_size,
+      tl.cex = correlation_heatmap_axis_font_size,
+      tl.srt = 60,
+      outline.color = "white"
+    )
+  ) +
+    ggplot2::labs(title = title) +
+    ggplot2::theme_minimal(base_family = protocol_font_family, base_size = correlation_heatmap_base_font_size) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = correlation_heatmap_base_font_size + 1, hjust = 0.5, face = "bold"),
+      axis.title.x = ggplot2::element_text(size = correlation_heatmap_base_font_size - 3),
+      axis.title.y = ggplot2::element_text(size = correlation_heatmap_base_font_size - 3),
+      axis.text.x = ggplot2::element_text(size = correlation_heatmap_axis_font_size, angle = 60, hjust = 1, vjust = 1),
+      axis.text.y = ggplot2::element_text(size = correlation_heatmap_axis_font_size, lineheight = 0.85),
+      legend.title = ggplot2::element_text(size = correlation_heatmap_base_font_size - 1),
+      legend.text = ggplot2::element_text(size = correlation_heatmap_base_font_size - 2),
+      legend.key.height = grid::unit(0.35, "cm"),
+      plot.margin = ggplot2::margin(8, 14, 28, 28)
+    )
+
+  plot_dim <- max(params$fig_width_wide, min(26, ncol(cor_mat) * 0.75))
+
+  ggplot2::ggsave(
+    out_path,
+    p,
+    width = plot_dim,
+    height = plot_dim,
+    dpi = 300
+  )
+  out_path
+}
+
+sanitize_file_name <- function(x) {
+  x %>%
+    stringr::str_replace_all("[^A-Za-z0-9_.-]+", "_") %>%
+    stringr::str_replace_all("_+", "_") %>%
+    stringr::str_replace_all("^_|_$", "")
+}
+
+short_file_hash <- function(...) {
+  key <- paste(..., collapse = "|")
+  key_int <- utf8ToInt(enc2utf8(key))
+  if (length(key_int) == 0) {
+    return("00000000")
+  }
+
+  sprintf("%08d", as.integer(sum((seq_along(key_int) %% 997) * key_int) %% 100000000))
+}
+
+bounded_file_stem <- function(prefix, ..., max_chars = 96) {
+  key <- paste(..., collapse = "_")
+  prefix_clean <- sanitize_file_name(prefix)
+  key_clean <- sanitize_file_name(key)
+  hash <- short_file_hash(prefix, key)
+  reserved <- nchar(prefix_clean) + nchar(hash) + 2
+  key_limit <- max(12, max_chars - reserved)
+  key_short <- substr(key_clean, 1, key_limit)
+  sanitize_file_name(paste(prefix_clean, key_short, hash, sep = "_"))
+}
+
+sanitize_col_name <- function(x, default_name) {
+  if (is.null(x) || !nzchar(trimws(as.character(x)))) {
+    return(default_name)
+  }
+  trimws(as.character(x))
+}
+
+col_slide <- sanitize_col_name(params$col_slide, "slide_name")
+col_patient <- sanitize_col_name(params$col_patient, "patient_id")
+col_disease <- sanitize_col_name(params$col_disease_status, "disease_status")
+col_cell_type <- sanitize_col_name(params$col_cell_type, "cell_type")
+col_segment <- sanitize_col_name(params$col_segment, "segment")
+contrast_factor <- sanitize_col_name(params$contrast_factor, "Annotation")
+model_group_col <- "DE_Group"
+contrast_group_col <- "contrast_group"
+contrast_source_group_col <- "contrast_source_group"
+boxplot_x_col <- sanitize_col_name(params$boxplot_x_col, col_disease)
+boxplot_color_col <- sanitize_col_name(params$boxplot_color_col, col_disease)
+boxplot_facet_col <- sanitize_col_name(params$boxplot_facet_col, "")
+
+# Per-segment tab-strip mode for the top-gene boxplots: "auto" (default) only emits
+# the strip when the segment column is meaningfully distinct from the contrast axis,
+# "always" reproduces the previous behaviour, "never" suppresses it entirely.
+boxplot_segment_tabs <- local({
+  mode <- tolower(sanitize_col_name(params$boxplot_segment_tabs, "auto"))
+  if (!mode %in% c("auto", "always", "never")) {
+    message("Unrecognised boxplot_segment_tabs value '", params$boxplot_segment_tabs,
+            "'; defaulting to 'auto'.")
+    mode <- "auto"
+  }
+  mode
+})
+
+metadata_label <- function(x) {
+  x <- stringr::str_replace_all(as.character(x), "_", " ")
+  stringr::str_to_sentence(stringr::str_squish(x))
+}
+
+stage6_discrete_palette <- function(levels, fallback_level = "Unknown") {
+  if (exists("protocol_discrete_palette", mode = "function")) {
+    return(protocol_discrete_palette(levels, fallback_level = fallback_level))
+  }
+
+  clean_levels <- unique(trimws(as.character(levels)))
+  clean_levels <- clean_levels[!is.na(clean_levels) & nzchar(clean_levels)]
+  if (length(clean_levels) == 0) {
+    clean_levels <- fallback_level
+  }
+
+  okabe_ito <- tryCatch(
+    unname(grDevices::palette.colors(palette = "Okabe-Ito")),
+    error = function(e) c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#999999")
+  )
+
+  colors <- if (length(clean_levels) <= length(okabe_ito)) {
+    okabe_ito[seq_along(clean_levels)]
+  } else {
+    grDevices::colorRampPalette(okabe_ito)(length(clean_levels))
+  }
+
+  stats::setNames(colors, clean_levels)
+}
+
+ensure_metadata_column <- function(pd, target_col, candidate_cols, default_value, label_text) {
+  if (target_col %in% names(pd)) {
+    return(pd)
+  }
+
+  candidate_hit <- candidate_cols[candidate_cols %in% names(pd)]
+  if (length(candidate_hit) > 0) {
+    pd[[target_col]] <- pd[[candidate_hit[1]]]
+    warning(
+      "Requested ", label_text, " column '", target_col, "' was not found. ",
+      "Using fallback column '", candidate_hit[1], "' copied into '", target_col, "'."
+    )
+    return(pd)
+  }
+
+  pd[[target_col]] <- default_value
+  warning(
+    "Requested ", label_text, " column '", target_col, "' was not found and no fallback column matched. ",
+    "Created placeholder column '", target_col, "' for protocol continuity."
+  )
+  pd
+}
+
+# Mirror Stage 5's disease-label normalisation so the Annotation/DE_Group keys
+# reconstructed here match the contrast group names written by Stage 5. Without
+# this, datasets whose raw disease labels are not already normalised (e.g.
+# "Tumour", lowercase "tumor", "normal") fail the contrast-arm match and the
+# top-gene boxplots are silently skipped.
+normalize_disease_labels <- function(x) {
+  x <- as.character(x)
+  x <- stringr::str_trim(x)
+  x_low <- stringr::str_to_lower(x)
+  dplyr::case_when(
+    x_low %in% c("healthy", "normal") ~ "Healthy",
+    x_low %in% c("tumour", "tumor", "disease") ~ "Tumor",
+    TRUE ~ stringr::str_to_title(x)
+  )
+}
+
+ensure_de_group_column <- function(pd) {
+  if (!(contrast_factor %in% names(pd)) &&
+      identical(contrast_factor, "Annotation") &&
+      all(c(col_cell_type, col_disease) %in% names(pd))) {
+    pd[[contrast_factor]] <- paste(pd[[col_cell_type]], normalize_disease_labels(pd[[col_disease]]), sep = "_")
+  }
+
+  if (!(model_group_col %in% names(pd)) && contrast_factor %in% names(pd)) {
+    contrast_values <- trimws(as.character(pd[[contrast_factor]]))
+    pd[[model_group_col]] <- make.names(contrast_values)
+  }
+
+  pd
+}
+
+extract_contrast_terms <- function(contrast_expr) {
+  contrast_expr <- as.character(contrast_expr)
+  if (length(contrast_expr) == 0 || is.na(contrast_expr) || !nzchar(contrast_expr)) {
+    return(character())
+  }
+
+  terms <- stringr::str_extract_all(contrast_expr, "`[^`]+`|[A-Za-z][A-Za-z0-9_.]*")[[1]]
+  terms <- stringr::str_replace_all(terms, "^`|`$", "")
+  terms <- terms[!terms %in% c("NA", "NaN", "Inf")]
+  unique(make.names(terms[nzchar(terms)]))
+}
+
+selected_contrast_inventory_row <- function(contrast_name) {
+  if (!exists("selected_contrast_inventory") || is.null(selected_contrast_inventory)) {
+    return(tibble::tibble())
+  }
+
+  selected_contrast_inventory %>%
+    dplyr::filter(.data$contrast == contrast_name) %>%
+    dplyr::slice_head(n = 1)
+}
+
+resolve_contrast_panel_metadata <- function(contrast_name, pd) {
+  pd <- ensure_de_group_column(pd)
+  unresolved <- list(
+    data = pd[0, , drop = FALSE],
+    x_col = boxplot_x_col,
+    color_col = boxplot_color_col,
+    status = "unresolved_contrast_metadata",
+    reason = "Stage 5 contrast metadata could not be resolved. Boxplots are skipped to avoid displaying samples that are not matched to the selected contrast.",
+    numerator_label = "",
+    denominator_label = "",
+    numerator_terms = character(),
+    denominator_terms = character()
+  )
+
+  if (!(model_group_col %in% names(pd))) {
+    return(unresolved)
+  }
+
+  contrast_row <- selected_contrast_inventory_row(contrast_name)
+  if (nrow(contrast_row) == 0) {
+    return(unresolved)
+  }
+
+  numerator_label <- as.character(contrast_row$contrast_table_group_1[[1]])
+  denominator_label <- as.character(contrast_row$contrast_table_group_2[[1]])
+  contrast_expr <- as.character(contrast_row$contrast_table_expr[[1]])
+
+  if (is.na(numerator_label) || !nzchar(numerator_label)) {
+    return(unresolved)
+  }
+  if (is.na(denominator_label) || !nzchar(denominator_label)) {
+    denominator_label <- "Comparator"
+  }
+
+  numerator_terms <- make.names(numerator_label)
+  contrast_terms <- extract_contrast_terms(contrast_expr)
+  denominator_terms <- setdiff(contrast_terms, numerator_terms)
+
+  if (length(denominator_terms) == 0 && !is.na(denominator_label) && nzchar(denominator_label)) {
+    denominator_terms <- make.names(denominator_label)
+  }
+
+  source_group <- as.character(pd[[model_group_col]])
+  contrast_group <- rep(NA_character_, length(source_group))
+  contrast_group[source_group %in% numerator_terms] <- numerator_label
+  contrast_group[source_group %in% denominator_terms] <- denominator_label
+
+  pd[[contrast_source_group_col]] <- source_group
+  pd[[contrast_group_col]] <- factor(contrast_group, levels = unique(c(numerator_label, denominator_label)))
+
+  resolved_pd <- pd[!is.na(pd[[contrast_group_col]]), , drop = FALSE]
+  if (nrow(resolved_pd) == 0 || dplyr::n_distinct(as.character(resolved_pd[[contrast_group_col]])) < 2) {
+    unresolved$data <- resolved_pd
+    unresolved$status <- "insufficient_contrast_arms"
+    unresolved$reason <- glue::glue(
+      "Stage 5 contrast groups were parsed for '{selected_contrast_heatmap_label(contrast_name)}', ",
+      "but fewer than two contrast arms were represented in the selected expression metadata. Boxplots are skipped rather than reverting to unfiltered samples."
+    )
+    return(unresolved)
+  }
+
+  list(
+    data = resolved_pd,
+    x_col = boxplot_x_col,
+    color_col = boxplot_color_col,
+    status = "resolved",
+    reason = glue::glue(
+      "Samples were restricted to the Stage 5 contrast arms '{numerator_label}' and '{denominator_label}'. ",
+      "Boxes use the configured '{boxplot_x_col}' metadata column and points use the configured '{boxplot_color_col}' metadata column. ",
+      "For one-vs-rest contrasts, the denominator arm aggregates the denominator terms recorded in contrast_table_expanded.tsv."
+    ),
+    numerator_label = numerator_label,
+    denominator_label = denominator_label,
+    numerator_terms = numerator_terms,
+    denominator_terms = denominator_terms
+  )
+}
+
+get_pheno <- function(obj) {
+  if (inherits(obj, "DGEList")) {
+    return(as.data.frame(obj$samples))
+  }
+  if (methods::is(obj, "ExpressionSet")) {
+    return(Biobase::pData(obj))
+  }
+  if (methods::is(obj, "SummarizedExperiment")) {
+    return(as.data.frame(SummarizedExperiment::colData(obj)))
+  }
+  stop("Unsupported object type for metadata extraction: ", paste(class(obj), collapse = ", "), call. = FALSE)
+}
+
+set_pheno <- function(obj, pd) {
+  if (inherits(obj, "DGEList")) {
+    obj$samples <- as.data.frame(pd)
+    return(obj)
+  }
+  if (methods::is(obj, "ExpressionSet")) {
+    Biobase::pData(obj) <- pd
+    return(obj)
+  }
+  if (methods::is(obj, "SummarizedExperiment")) {
+    SummarizedExperiment::colData(obj) <- S4Vectors::DataFrame(pd)
+    return(obj)
+  }
+  stop("Unsupported object type for metadata assignment: ", paste(class(obj), collapse = ", "), call. = FALSE)
+}
+
+get_expr_mat <- function(obj, elt = params$expression_assay) {
+  # Display each method on the scale its DE statistics were computed on, rather
+  # than a single global assay (which returned raw counts for TMM and raw exprs
+  # for Q3, misrepresenting the modelled signal):
+  #   - TMM (DGEList)      -> log-CPM (the limma-voom modelling scale)
+  #   - GeoDiff (normmat)  -> normmat assay (already log-normalised)
+  #   - Q3 (q_norm)        -> log2(q_norm) (the limma-trend Q3 modelling scale)
+  if (inherits(obj, "DGEList")) {
+    return(edgeR::cpm(obj, log = TRUE))
+  }
+  if (methods::is(obj, "ExpressionSet")) {
+    assays <- Biobase::assayDataElementNames(obj)
+    if ("normmat" %in% assays) {
+      return(as.matrix(Biobase::assayDataElement(obj, elt = "normmat")))
+    }
+    if ("q_norm" %in% assays) {
+      return(log2(as.matrix(Biobase::assayDataElement(obj, elt = "q_norm"))))
+    }
+    mat <- tryCatch(Biobase::assayDataElement(obj, elt = elt), error = function(e) NULL)
+    if (!is.null(mat)) {
+      return(as.matrix(mat))
+    }
+    return(Biobase::exprs(obj))
+  }
+  if (methods::is(obj, "SummarizedExperiment")) {
+    return(as.matrix(SummarizedExperiment::assay(obj)))
+  }
+  stop("Unsupported object type for expression extraction: ", paste(class(obj), collapse = ", "), call. = FALSE)
+}
+
+prepare_visualisation_metadata <- function(obj) {
+  pd <- get_pheno(obj)
+  pd <- ensure_metadata_column(pd, col_slide, c("slide_name", "slide", "Slide"), "slide_1", "slide")
+  pd <- ensure_metadata_column(pd, col_patient, c("patient_id", "patient", "PatientID", "Sample ID"), rownames(pd), "patient")
+  pd <- ensure_metadata_column(pd, col_disease, c("disease_status", "disease", "condition", "status"), "UnknownDisease", "disease status")
+  pd <- ensure_metadata_column(pd, col_cell_type, c("cell_type", "celltype", "annotation", "segment"), "UnknownCellType", "cell type")
+  pd <- ensure_metadata_column(pd, col_segment, c("segment", "annotation", "region"), rownames(pd), "segment")
+  # Normalise disease labels before building Annotation so the key matches Stage 5.
+  pd[[col_disease]] <- normalize_disease_labels(pd[[col_disease]])
+  pd$Annotation <- make.names(paste0(pd[[col_cell_type]], "_", pd[[col_disease]]))
+  set_pheno(obj, pd)
+}
+
+method_expression_object_name <- function(method_name) {
+  dplyr::case_when(
+    method_name == "limma_voom_TMM" ~ "TMM",
+    method_name == "limma_trend_Q3" ~ "Q3",
+    TRUE ~ "GeoDiff"
+  )
+}
+
+is_geodiff_method <- function(method_name) {
+  method_name %in% c("dream_GeoDiffCounts", "limma_voom_GeoDiff", "limma_trend_GeoDiff")
+}
+
+method_display_label <- function(method_name) {
+  dplyr::case_when(
+    method_name == "dream_GeoDiffCounts" ~ "Dream",
+    method_name == "limma_voom_TMM" ~ "Limma voom: TMM-scaled count data",
+    method_name == "limma_voom_GeoDiff" ~ "Limma voom: GeoDiff-filtered count data",
+    method_name == "limma_trend_Q3" ~ "Limma trend: Q3 normalised data",
+    method_name == "limma_trend_GeoDiff" ~ "Limma trend: GeoDiff-normalized normmat data",
+    TRUE ~ method_name
+  )
+}
+
+make_visual_result <- function(plot = NULL,
+                               status = c("generated", "skipped", "failed"),
+                               reason = "",
+                               output_file = NA_character_,
+                               genes_plotted = NA_integer_,
+                               samples_plotted = NA_integer_) {
+  status <- match.arg(status)
+  list(
+    plot = plot,
+    status = status,
+    reason = reason,
+    output_file = output_file,
+    genes_plotted = genes_plotted,
+    samples_plotted = samples_plotted
+  )
+}
+
+is_renderable_plot <- function(plot) {
+  inherits(plot, c("ggplot", "grob", "gTree", "gtable"))
+}
+
+visual_result_to_audit <- function(result, method_name, plot_family, expression_object = NA_character_) {
+  if (is.null(result)) {
+    result <- make_visual_result(status = "failed", reason = "Plot helper returned NULL without a structured result.")
+  }
+
+  tibble::tibble(
+    method_name = method_name,
+    plot_family = plot_family,
+    expression_object = expression_object,
+    status = result$status,
+    reason = result$reason,
+    genes_plotted = result$genes_plotted,
+    samples_plotted = result$samples_plotted,
+    output_file = paste(stats::na.omit(result$output_file), collapse = "; ")
+  )
+}
+
+display_visual_result <- function(result, title, caption) {
+  emit_markdown(glue::glue("\n\n##### {title}\n\n"))
+
+  if (is.null(result) || !identical(result$status, "generated") || is.null(result$plot)) {
+    reason <- if (is.null(result) || !nzchar(result$reason)) "No reason was recorded." else result$reason
+    emit_markdown(glue::glue("::: {{.callout-note}}\nThis figure was not generated for this render. {reason}\n:::\n\n"))
+    return(invisible(NULL))
+  }
+
+  if (display_saved_figure(result$output_file, caption)) {
+    return(invisible(result))
+  }
+  caption <- numbered_figure_caption(caption)
+
+  if (inherits(result$plot, "ggplot")) {
+    print(result$plot)
+  } else if (inherits(result$plot, c("grob", "gTree", "gtable"))) {
+    grid::grid.newpage()
+    grid::grid.draw(result$plot)
+  } else {
+    print(result$plot)
+  }
+  emit_markdown(glue::glue("\n\n<div class=\"protocol-figure-note\">{caption}</div>\n\n"))
+
+  invisible(result)
+}
+
+save_grid_plot <- function(grob, file_base, width, height, dpi = 300) {
+  pdf_file <- paste0(file_base, ".pdf")
+  png_file <- paste0(file_base, ".png")
+
+  grDevices::pdf(pdf_file, width = width, height = height, useDingbats = FALSE)
+  grid::grid.newpage()
+  grid::grid.draw(grob)
+  grDevices::dev.off()
+
+  grDevices::png(png_file, width = width, height = height, units = "in", res = dpi, bg = "white")
+  grid::grid.newpage()
+  grid::grid.draw(grob)
+  grDevices::dev.off()
+
+  c(pdf = pdf_file, png = png_file)
+}
+
+sanitize_results_list <- function(results_list, method_name) {
+  cleaned <- purrr::imap(results_list, function(tbl, contrast_name) {
+    out <- standardise_de_table(tbl)
+    if (is.null(out)) {
+      message(glue::glue("Skipping {method_name}/{contrast_name}: result table could not be standardised."))
+      return(NULL)
+    }
+    out <- out %>%
+      dplyr::filter(is.finite(.data$logFC), is.finite(.data$adj.P.Val))
+    if (nrow(out) == 0) {
+      message(glue::glue("Skipping {method_name}/{contrast_name}: no finite logFC/adj.P.Val rows."))
+      return(NULL)
+    }
+    out <- as.data.frame(out)
+    rownames(out) <- make.unique(out$gene)
+    out
+  })
+
+  cleaned <- cleaned[!vapply(cleaned, is.null, logical(1))]
+  if (length(cleaned) == 0) {
+    message(glue::glue("No plottable contrast tables remain for {method_name}."))
+  }
+  cleaned
+}
+
+style_compact_plot <- function(p,
+                               title_width = 32,
+                               title_size = 8,
+                               axis_title_size = 7,
+                               axis_text_size = 6) {
+  if (!inherits(p, "ggplot")) {
+    return(p)
+  }
+
+  current_title <- p$labels$title
+  if (is.null(current_title)) {
+    current_title <- ""
+  }
+
+  p +
+    labs(title = stringr::str_wrap(as.character(current_title), width = title_width)) +
+    theme(
+      text = element_text(family = "Segoe UI"),
+      plot.title = element_text(size = title_size, face = "bold", lineheight = 0.95),
+      axis.title.x = element_text(size = axis_title_size),
+      axis.title.y = element_text(size = axis_title_size),
+      axis.text = element_text(size = axis_text_size),
+      legend.title = element_text(size = axis_title_size),
+      legend.text = element_text(size = axis_text_size),
+      plot.margin = margin(5, 5, 5, 5)
+    )
+}
+
+fallback_volcano_plot <- function(tbl,
+                                  title = "",
+                                  top_n = params$top_genes_per_volcano,
+                                  adj_p_cutoff = volcano_adj_p_cutoff,
+                                  logfc_cutoff = volcano_logfc_cutoff,
+                                  point_size = volcano_point_size) {
+  clean_tbl <- standardise_de_table(tbl)
+  if (is.null(clean_tbl) || nrow(clean_tbl) == 0) {
+    return(ggplot() + labs(title = paste("No plottable volcano data:", title)))
+  }
+
+  clean_tbl <- clean_tbl %>%
+    dplyr::mutate(
+      neg_log10_adj_p = -log10(pmax(.data$adj.P.Val, .Machine$double.xmin)),
+      Expression = dplyr::case_when(
+        .data$logFC > logfc_cutoff & .data$adj.P.Val < adj_p_cutoff ~ "Up-regulated",
+        .data$logFC < -logfc_cutoff & .data$adj.P.Val < adj_p_cutoff ~ "Down-regulated",
+        TRUE ~ "Unchanged"
+      ),
+      Expression = factor(Expression, levels = c("Down-regulated", "Unchanged", "Up-regulated"))
+    )
+
+  label_tbl <- dplyr::bind_rows(
+    clean_tbl %>%
+      dplyr::filter(.data$Expression == "Up-regulated") %>%
+      dplyr::arrange(.data$adj.P.Val, dplyr::desc(abs(.data$logFC))) %>%
+      utils::head(top_n),
+    clean_tbl %>%
+      dplyr::filter(.data$Expression == "Down-regulated") %>%
+      dplyr::arrange(.data$adj.P.Val, dplyr::desc(abs(.data$logFC))) %>%
+      utils::head(top_n)
+  )
+
+  p <- ggplot(clean_tbl, aes(x = .data$logFC, y = .data$neg_log10_adj_p, color = .data$Expression)) +
+    geom_point(alpha = 0.6, size = point_size, na.rm = TRUE) +
+    geom_text(data = label_tbl, aes(label = .data$gene), size = 2.5, check_overlap = TRUE, na.rm = TRUE) +
+    geom_vline(xintercept = unique(c(-logfc_cutoff, logfc_cutoff)), linetype = "dashed", linewidth = 0.2) +
+    geom_hline(yintercept = -log10(adj_p_cutoff), linetype = "dashed", linewidth = 0.2) +
+    # Okabe-Ito accessible colours for DE direction (blue / grey / vermillion).
+    scale_color_manual(values = c(
+      "Down-regulated" = unname(protocol_okabe_ito()[["blue"]]),
+      "Unchanged"      = unname(protocol_okabe_ito()[["grey"]]),
+      "Up-regulated"   = unname(protocol_okabe_ito()[["vermillion"]])
+    ), name = "Expression") +
+    labs(title = title, x = expression("log"[2]*"FC"), y = expression("-log"[10]*"FDR")) +
+    theme_bw(base_size = 8) +
+    theme(text = element_text(family = "Segoe UI"))
+
+  p
+}
+
+plot_volcano_grid <- function(results_list, method_name) {
+  cleaned <- sanitize_results_list(results_list, method_name)
+  if (length(cleaned) == 0) {
+    return(make_visual_result(
+      status = "skipped",
+      reason = glue::glue("No plottable contrast tables remained for {method_name}.")
+    ))
+  }
+
+  volcano_plots <- purrr::imap(cleaned, function(tbl, contrast_name) {
+    title <- gsub("^OneVsRest", "", contrast_name)
+    plot_obj <- if (exists("plotVolcano", mode = "function")) {
+      tryCatch(
+        plotVolcano(
+          tbl,
+          title = title,
+          top.genes = params$top_genes_per_volcano,
+          point.size = volcano_point_size,
+          lab.size = 2.1,
+          quadrants = TRUE,
+          adj.p.cutoff = volcano_adj_p_cutoff,
+          logFC.cutoff = volcano_logfc_cutoff
+        ),
+        error = function(e) fallback_volcano_plot(
+          tbl,
+          title = title,
+          adj_p_cutoff = volcano_adj_p_cutoff,
+          logfc_cutoff = volcano_logfc_cutoff,
+          point_size = volcano_point_size
+        )
+      )
+    } else {
+      fallback_volcano_plot(
+        tbl,
+        title = title,
+        adj_p_cutoff = volcano_adj_p_cutoff,
+        logfc_cutoff = volcano_logfc_cutoff,
+        point_size = volcano_point_size
+      )
+    }
+    style_compact_plot(plot_obj, title_width = 28, title_size = 7.5, axis_title_size = 6.5, axis_text_size = 5.5)
+  })
+
+  volcano_ncol <- min(3, length(volcano_plots))
+  volcano_nrow <- ceiling(length(volcano_plots) / volcano_ncol)
+  panel_grid <- cowplot::plot_grid(plotlist = volcano_plots, ncol = volcano_ncol, align = "hv")
+  title_panel <- cowplot::ggdraw() +
+    cowplot::draw_label(
+      glue::glue("{method_display_label(method_name)} volcano plots\nStage 5 method object: {method_name}"),
+      fontface = "bold",
+      size = 13,
+      x = 0,
+      hjust = 0
+    )
+  p <- cowplot::plot_grid(title_panel, panel_grid, ncol = 1, rel_heights = c(0.08, 1))
+  out_file <- fs::path(out_figures_de, paste0("region_volcano_plots_", sanitize_file_name(method_name), ".png"))
+  cowplot::save_plot(
+    plot = p,
+    filename = out_file,
+    base_height = max(params$fig_height_grid, 3.2 * volcano_nrow + 0.8),
+    base_width = max(params$fig_width_wide, 5.2 * volcano_ncol),
+    bg = "white"
+  )
+  make_visual_result(
+    plot = p,
+    status = "generated",
+    output_file = out_file
+  )
+}
+
+# DEResPlot() can return a ggplot whose faceting/aesthetic problems only surface
+# at draw time (e.g. "Faceting variables must have at least one value"), so a plot
+# can pass is_renderable_plot() yet still fail later inside ggsave(). This helper
+# renders the plot to a throwaway device to confirm it actually draws, so callers
+# can fall back to the explicit summary instead of emitting a "not generated" panel.
+plot_draws_cleanly <- function(p) {
+  if (is.null(p)) return(FALSE)
+  prev_dev <- grDevices::dev.cur()
+  tmp <- tempfile(fileext = ".png")
+  grDevices::png(tmp, width = 200, height = 200)
+  ok <- tryCatch({
+    if (inherits(p, "ggplot")) print(p) else if (inherits(p, c("gtable", "grob"))) grid::grid.draw(p) else print(p)
+    TRUE
+  }, error = function(e) FALSE)
+  grDevices::dev.off()
+  if (!is.null(prev_dev) && prev_dev > 1 && prev_dev %in% grDevices::dev.list()) grDevices::dev.set(prev_dev)
+  if (file.exists(tmp)) unlink(tmp)
+  ok
+}
+
+plot_de_summary_panel <- function(results_list, method_name) {
+  cleaned <- sanitize_results_list(results_list, method_name)
+  if (length(cleaned) == 0) {
+    return(make_visual_result(
+      status = "skipped",
+      reason = glue::glue("No plottable contrast tables remained for {method_name}.")
+    ))
+  }
+
+  de_summary_plot <- NULL
+  de_summary_table <- NULL
+  helper_reason <- ""
+
+  if (exists("DEResPlot", mode = "function")) {
+    stains_arg <- if (exists("stain_pattern_for_de_summary") && nzchar(stain_pattern_for_de_summary)) {
+      stain_pattern_for_de_summary
+    } else {
+      NULL
+    }
+
+    de_res <- tryCatch(
+      DEResPlot(cleaned, foldChangeColumn = "logFC", FDRColumn = "adj.P.Val", stains = stains_arg, title = method_name,
+                adj.p.cutoff = params$adj_p_cutoff, logfc.cutoff = params$logFC_cutoff),
+      error = function(e) {
+        helper_reason <<- conditionMessage(e)
+        NULL
+      }
+    )
+    if (!is.null(de_res) && length(de_res) >= 1) {
+      de_summary_plot <- de_res[[1]]
+      if (length(de_res) >= 2) de_summary_table <- de_res[[2]]
+    }
+  }
+
+  # Reject a DEResPlot() result that constructs but fails to draw (deferred ggplot
+  # faceting errors) so the explicit signed-bar fallback below is used instead.
+  if (!is.null(de_summary_plot) && is_renderable_plot(de_summary_plot) && !plot_draws_cleanly(de_summary_plot)) {
+    if (!nzchar(helper_reason)) {
+      helper_reason <- "DEResPlot() returned a plot that failed to render (for example an empty facet)."
+    }
+    de_summary_plot <- NULL
+  }
+
+  if (is.null(de_summary_plot) || !is_renderable_plot(de_summary_plot)) {
+    if (nzchar(helper_reason)) {
+      message(glue::glue("Using fallback DE summary plot for {method_name}: DEResPlot() failed with: {helper_reason}"))
+    } else if (!exists("DEResPlot", mode = "function")) {
+      message(glue::glue("Using fallback DE summary plot for {method_name}: DEResPlot() is not available."))
+    } else {
+      message(glue::glue("Using fallback DE summary plot for {method_name}: DEResPlot() did not return a renderable plot object."))
+    }
+
+    de_summary_table <- purrr::imap_dfr(cleaned, function(tbl, contrast_name) {
+      sig_tbl <- tbl %>%
+        dplyr::filter(.data$adj.P.Val < params$adj_p_cutoff, abs(.data$logFC) > params$logFC_cutoff)
+      tibble::tibble(
+        contrast = contrast_name,
+        upregulated = sum(sig_tbl$logFC > 0, na.rm = TRUE),
+        downregulated = sum(sig_tbl$logFC < 0, na.rm = TRUE)
+      )
+    })
+
+    de_summary_plot <- de_summary_table %>%
+      tidyr::pivot_longer(c("upregulated", "downregulated"), names_to = "direction", values_to = "n") %>%
+      dplyr::mutate(n_signed = ifelse(.data$direction == "downregulated", -.data$n, .data$n)) %>%
+      ggplot(aes(x = .data$contrast, y = .data$n_signed, fill = .data$direction)) +
+      geom_col() +
+      coord_flip() +
+      labs(
+        title = glue::glue("Differential-expression summary: {method_name}"),
+        x = "Contrast",
+        y = "Significant genes",
+        fill = "Direction"
+      ) +
+      theme_bw(base_size = 10)
+  }
+
+  if (!is.null(de_summary_table) && is.data.frame(de_summary_table)) {
+    readr::write_csv(de_summary_table, fs::path(out_results_de, paste0("de_summary_", sanitize_file_name(method_name), ".csv")))
+  }
+
+  de_summary_plot <- style_compact_plot(
+    de_summary_plot,
+    title_width = 48,
+    title_size = 10,
+    axis_title_size = 8,
+    axis_text_size = 7
+  )
+
+  out_file <- fs::path(out_figures_de, paste0("de_summary_", sanitize_file_name(method_name), ".png"))
+  ggsave(
+    filename = out_file,
+    plot = de_summary_plot,
+    width = params$fig_width_standard,
+    height = params$fig_height_standard,
+    dpi = 300,
+    bg = "white"
+  )
+  make_visual_result(
+    plot = de_summary_plot,
+    status = "generated",
+    output_file = out_file
+  )
+}
+
+select_significant_genes_for_visuals <- function(results_list, max_genes = Inf) {
+  gene_tbl <- purrr::imap_dfr(results_list, function(tbl, contrast_name) {
+    clean_tbl <- standardise_de_table(tbl)
+    if (is.null(clean_tbl)) return(tibble::tibble())
+    clean_tbl %>%
+      dplyr::filter(
+        is.finite(.data$adj.P.Val),
+        is.finite(.data$logFC),
+        .data$adj.P.Val < params$adj_p_cutoff,
+        abs(.data$logFC) > params$logFC_cutoff
+      ) %>%
+      dplyr::mutate(score = -log10(pmax(.data$adj.P.Val, .Machine$double.xmin)) * abs(.data$logFC))
+  })
+
+  if (nrow(gene_tbl) == 0) {
+    return(character())
+  }
+
+  gene_tbl %>%
+    dplyr::group_by(.data$gene) %>%
+    dplyr::summarise(score = max(.data$score, na.rm = TRUE), .groups = "drop") %>%
+    dplyr::arrange(dplyr::desc(.data$score)) %>%
+    dplyr::slice_head(n = max_genes) %>%
+    dplyr::pull(.data$gene)
+}
+
+plot_heatmap_for_method <- function(results_list, method_name, expr_obj) {
+  genes <- select_significant_genes_for_visuals(results_list, max_genes = params$core_heatmap_max_genes)
+  expr_mat <- get_expr_mat(expr_obj)
+  genes <- intersect(genes, rownames(expr_mat))
+
+  if (length(genes) < 2 || ncol(expr_mat) < 2) {
+    return(make_visual_result(
+      status = "skipped",
+      reason = glue::glue("Need at least 2 significant genes and 2 samples; found {length(genes)} gene(s) and {ncol(expr_mat)} sample(s)."),
+      genes_plotted = length(genes),
+      samples_plotted = ncol(expr_mat)
+    ))
+  }
+
+  heatmap_mat <- expr_mat[genes, , drop = FALSE]
+  heatmap_mat[!is.finite(heatmap_mat)] <- NA_real_
+  heatmap_mat <- heatmap_mat[rowSums(is.na(heatmap_mat)) == 0, , drop = FALSE]
+  if (nrow(heatmap_mat) < 2) {
+    return(make_visual_result(
+      status = "skipped",
+      reason = "Fewer than 2 complete genes remained after removing non-finite values.",
+      genes_plotted = nrow(heatmap_mat),
+      samples_plotted = ncol(heatmap_mat)
+    ))
+  }
+
+  pd <- get_pheno(expr_obj)
+  sample_ids <- intersect(colnames(heatmap_mat), rownames(pd))
+  heatmap_mat <- heatmap_mat[, sample_ids, drop = FALSE]
+  if (ncol(heatmap_mat) < 2) {
+    return(make_visual_result(
+      status = "skipped",
+      reason = "Fewer than 2 heatmap samples remained after matching expression columns to metadata rows.",
+      genes_plotted = nrow(heatmap_mat),
+      samples_plotted = ncol(heatmap_mat)
+    ))
+  }
+
+  annotation_cols <- unique(c(col_cell_type, col_disease, col_segment, col_patient))
+  annotation_cols <- annotation_cols[annotation_cols %in% names(pd)]
+  annotation_df <- as.data.frame(pd[, annotation_cols, drop = FALSE])
+  annotation_df <- annotation_df[colnames(heatmap_mat), , drop = FALSE]
+
+  # Protocol divergent palette (accessible Okabe-Ito blue -> near-white ->
+  # vermillion), replacing pheatmap's default RdYlBu so the DE heatmap matches the
+  # volcano and DE summary bars. scale = "row" makes values divergent around 0, so
+  # breaks are made symmetric to keep the near-white midpoint pinned at no change.
+  heatmap_scaled <- t(scale(t(heatmap_mat)))
+  heatmap_absmax <- max(abs(heatmap_scaled[is.finite(heatmap_scaled)]))
+  if (!is.finite(heatmap_absmax) || heatmap_absmax == 0) heatmap_absmax <- 1
+  heatmap_colors <- grDevices::colorRampPalette(unname(protocol_divergent_palette()))(100)
+  heatmap_breaks <- seq(-heatmap_absmax, heatmap_absmax, length.out = length(heatmap_colors) + 1L)
+
+  heatmap_obj <- pheatmap::pheatmap(
+    heatmap_mat,
+    scale = "row",
+    color = heatmap_colors,
+    breaks = heatmap_breaks,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    show_rownames = nrow(heatmap_mat) <= 50,
+    show_colnames = FALSE,
+    fontsize = expression_heatmap_base_font_size,
+    fontsize_row = expression_heatmap_label_font_size,
+    fontsize_col = expression_heatmap_label_font_size,
+    treeheight_row = 28,
+    treeheight_col = 28,
+    border_color = NA,
+    annotation_col = annotation_df,
+    main = glue::glue("Significant DE genes: {method_name}"),
+    silent = TRUE
+  )
+  heatmap_gtable <- heatmap_obj$gtable
+  if (is.null(heatmap_gtable) && length(heatmap_obj) >= 4) {
+    heatmap_gtable <- heatmap_obj[[4]]
+  }
+  if (is.null(heatmap_gtable)) {
+    return(make_visual_result(
+      status = "failed",
+      reason = "pheatmap() completed but did not return a drawable gtable object.",
+      genes_plotted = nrow(heatmap_mat),
+      samples_plotted = ncol(heatmap_mat)
+    ))
+  }
+
+  out_files <- save_grid_plot(
+    grob = heatmap_gtable,
+    file_base = fs::path(out_figures_de, paste0("de_heatmap_", sanitize_file_name(method_name))),
+    width = params$fig_width_wide,
+    height = params$fig_height_wide
+  )
+
+  make_visual_result(
+    plot = heatmap_gtable,
+    status = "generated",
+    output_file = out_files,
+    genes_plotted = nrow(heatmap_mat),
+    samples_plotted = ncol(heatmap_mat)
+  )
+}
+
+as_character_vector <- function(x) {
+  if (is.null(x) || length(x) == 0) {
+    return(character())
+  }
+  if (is.list(x) && !is.null(x$value)) {
+    return(as_character_vector(x$value))
+  }
+  out <- unlist(x, use.names = FALSE)
+  out <- as.character(out)
+  out[!is.na(out) & nzchar(out)]
+}
+
+limit_file_stub_for_path <- function(file_stub,
+                                     out_dir,
+                                     extensions = c("pdf", "png"),
+                                     path_max = portable_path_limit) {
+  extensions <- stringr::str_remove(as.character(extensions), "^\\.")
+  longest_extension <- extensions[[which.max(nchar(extensions))]]
+  resolved_path <- protocol_output_path(
+    out_dir,
+    paste0(sanitize_file_name(file_stub), ".", longest_extension),
+    path_limit = path_max
+  )
+  tools::file_path_sans_ext(basename(resolved_path))
+}
+
+rank_genes_for_plot <- function(candidate_genes, de_table, n_genes) {
+  candidate_genes <- unique(as.character(candidate_genes))
+  candidate_genes <- candidate_genes[!is.na(candidate_genes) & nzchar(candidate_genes)]
+
+  n_genes <- suppressWarnings(as.integer(n_genes))
+  if (length(n_genes) == 0 || is.na(n_genes) || n_genes < 1) {
+    stop("Gene-panel plot limits must be positive whole numbers.", call. = FALSE)
+  }
+
+  clean_tbl <- standardise_de_table(de_table)
+  if (!is.null(clean_tbl) && nrow(clean_tbl) > 0) {
+    ranked_genes <- clean_tbl %>%
+      dplyr::filter(.data$gene %in% candidate_genes) %>%
+      dplyr::mutate(
+        rank_adj_p = dplyr::if_else(is.finite(.data$adj.P.Val), .data$adj.P.Val, Inf),
+        rank_abs_logfc = dplyr::if_else(is.finite(.data$logFC), abs(.data$logFC), -Inf)
+      ) %>%
+      dplyr::arrange(.data$rank_adj_p, dplyr::desc(.data$rank_abs_logfc), .data$gene) %>%
+      dplyr::pull(.data$gene)
+
+    remaining_genes <- setdiff(candidate_genes, ranked_genes)
+    candidate_genes <- c(ranked_genes, remaining_genes)
+  }
+
+  head(candidate_genes, n_genes)
+}
+
+left_side_of_contrast <- function(contrast_name) {
+  contrast_name %>%
+    stringr::str_split("\\s+-\\s+|\\s+-|[-]\\s+", n = 2, simplify = TRUE) %>%
+    .[, 1] %>%
+    stringr::str_trim()
+}
+
+infer_segment_filter <- function(contrast_name, segment_levels, selected_segment_regex = params$selected_segment_regex) {
+  selected_segment_regex <- trimws(as.character(selected_segment_regex))
+  if (nzchar(selected_segment_regex)) {
+    return(list(
+      filter = selected_segment_regex,
+      status = "user_defined_segment_regex",
+      reason = "Used selected_segment_regex from YAML."
+    ))
+  }
+
+  lhs <- left_side_of_contrast(contrast_name)
+  segment_levels <- unique(as.character(segment_levels))
+  segment_levels <- segment_levels[!is.na(segment_levels) & nzchar(segment_levels)]
+
+  if (!nzchar(lhs) || length(segment_levels) == 0) {
+    return(list(filter = "", status = "unresolved", reason = "No contrast left-hand side or segment metadata levels were available."))
+  }
+
+  ordered_levels <- segment_levels[order(nchar(segment_levels), decreasing = TRUE)]
+  level_matches <- ordered_levels[purrr::map_lgl(ordered_levels, ~ stringr::str_detect(lhs, stringr::fixed(.x, ignore_case = TRUE)))]
+  if (length(level_matches) > 0) {
+    return(list(filter = level_matches[[1]], status = "resolved_metadata_level", reason = "Matched a segment metadata level in the contrast left-hand side."))
+  }
+
+  prefix <- lhs %>%
+    stringr::str_replace("^\\s*`|`\\s*$", "") %>%
+    stringr::str_extract("^[A-Za-z0-9]+")
+
+  if (!is.na(prefix) && nzchar(prefix)) {
+    return(list(filter = prefix, status = "resolved_prefix", reason = "Used the prefix before punctuation in the contrast left-hand side."))
+  }
+
+  list(filter = "", status = "unresolved", reason = "Could not infer a segment token from the contrast left-hand side.")
+}
+
+make_plot_summary <- function(source_label,
+                              plot_family,
+                              contrast_name,
+                              scope,
+                              file_stub,
+                              requested_genes,
+                              plotted_genes = 0L,
+                              missing_genes = 0L,
+                              segment_filter = "",
+                              segment_label = "",
+                              contrast_label = "",
+                              disease_status_levels = "",
+                              boxplot_x_column = "",
+                              boxplot_color_column = "",
+                              boxplot_facet_column = "",
+                              samples_plotted = 0L,
+                              output_pdf = NA_character_,
+                              output_png = NA_character_,
+                              status = "skipped",
+                              reason = "") {
+  tibble::tibble(
+    source = source_label,
+    plot_family = plot_family,
+    contrast = contrast_name,
+    scope = scope,
+    figure = file_stub,
+    requested_genes = requested_genes,
+    plotted_genes = plotted_genes,
+    missing_genes = missing_genes,
+    segment_filter = ifelse(nzchar(segment_filter), segment_filter, "<none>"),
+    segment_label = ifelse(nzchar(segment_label), segment_label, "<none>"),
+    contrast_label = ifelse(nzchar(contrast_label), contrast_label, "<none>"),
+    disease_status_levels = ifelse(nzchar(disease_status_levels), disease_status_levels, "<not evaluated>"),
+    boxplot_x_column = ifelse(nzchar(boxplot_x_column), boxplot_x_column, "<not evaluated>"),
+    boxplot_color_column = ifelse(nzchar(boxplot_color_column), boxplot_color_column, "<not evaluated>"),
+    boxplot_facet_column = ifelse(nzchar(boxplot_facet_column), boxplot_facet_column, "<none>"),
+    samples_plotted = samples_plotted,
+    output_pdf = output_pdf,
+    output_png = output_png,
+    status = status,
+    reason = reason
+  )
+}
+
+gene_panel_caption <- function(plot_family,
+                               scope,
+                               segment_filter = "",
+                               segment_label = "",
+                               segment_column = "",
+                               contrast_name = "",
+                               x_col = boxplot_x_col,
+                               color_col = boxplot_color_col) {
+  scope_text <- if (identical(scope, "segment_filtered") && nzchar(segment_label)) {
+    segment_column_text <- if (nzchar(segment_column)) metadata_label(segment_column) else "Segment"
+    glue::glue("contrast-matched samples where `{segment_column_text}` is `{segment_label}`")
+  } else if (identical(scope, "segment_filtered")) {
+    "segment-filtered contrast-matched samples"
+  } else {
+    "all contrast-matched samples before segment filtering"
+  }
+
+  family_text <- dplyr::case_when(
+    identical(plot_family, "top_genes") ~ "Top DE expression for this selected contrast",
+    TRUE ~ "Requested gene expression"
+  )
+
+  contrast_text <- if (nzchar(contrast_name)) {
+    glue::glue(" for {selected_de_method}, {selected_contrast_heatmap_label(contrast_name)}")
+  } else {
+    ""
+  }
+
+  glue::glue(
+    "{family_text}{contrast_text} using {scope_text}. Boxes compare `{metadata_label(x_col)}` groups across individual samples, and points are colored by `{metadata_label(color_col)}`."
+  )
+}
+
+plot_gene_panel <- function(genes,
+                            panel_title,
+                            out_dir,
+                            file_stub,
+                            source_label = "",
+                            plot_family = "",
+                            contrast_name = "",
+                            scope = "all_samples",
+                            segment_filter = "",
+                            segment_label = "",
+                            segment_column = "",
+                            plot_pheno_df = NULL,
+                            x_col_override = "",
+                            color_col_override = "") {
+  requested_file_stub <- file_stub
+  file_stub <- limit_file_stub_for_path(file_stub, out_dir)
+  if (!identical(requested_file_stub, file_stub)) {
+    message(glue::glue("Shortened plot filename for Windows path compatibility: {file_stub}"))
+  }
+
+  genes <- unique(as.character(genes))
+  genes <- genes[!is.na(genes) & nzchar(genes)]
+  present_genes <- intersect(genes, rownames(selected_expr_mat))
+  missing_genes <- setdiff(genes, rownames(selected_expr_mat))
+
+  summary_row <- make_plot_summary(
+    source_label = source_label,
+    plot_family = plot_family,
+    contrast_name = contrast_name,
+    scope = scope,
+    file_stub = file_stub,
+    requested_genes = length(genes),
+    plotted_genes = length(present_genes),
+    missing_genes = length(missing_genes),
+    segment_filter = segment_filter,
+    segment_label = segment_label,
+    contrast_label = if (nzchar(contrast_name)) selected_contrast_heatmap_label(contrast_name) else ""
+  )
+
+  missing_tbl <- tibble::tibble(
+    source = source_label,
+    plot_family = plot_family,
+    contrast = contrast_name,
+    scope = scope,
+    figure = file_stub,
+    gene = missing_genes,
+    reason = "not present in expression matrix"
+  )
+
+  if (length(present_genes) == 0) {
+    message(glue::glue("Skipping {file_stub}: no requested genes were present in the expression matrix."))
+    summary_row$reason <- "No requested genes were present in the expression matrix."
+    return(list(summary = summary_row, missing = missing_tbl))
+  }
+
+  plot_mat <- selected_expr_mat[present_genes, , drop = FALSE]
+  panel_pheno_df <- if (is.null(plot_pheno_df)) selected_pheno_df else plot_pheno_df
+
+  plot_df <- as.data.frame(t(plot_mat)) %>%
+    tibble::rownames_to_column("sample_id") %>%
+    tidyr::pivot_longer(
+      cols = -sample_id,
+      names_to = "gene",
+      values_to = "expression"
+    ) %>%
+    dplyr::inner_join(panel_pheno_df, by = "sample_id")
+
+  if (nzchar(segment_filter)) {
+    segment_filter_cols <- if (nzchar(segment_column) && segment_column %in% names(plot_df)) {
+      segment_column
+    } else {
+      unique(c(col_segment, col_cell_type))
+    }
+    segment_filter_cols <- segment_filter_cols[segment_filter_cols %in% names(plot_df)]
+    plot_df <- tryCatch(
+      {
+        segment_keep <- if (length(segment_filter_cols) == 0) {
+          rep(FALSE, nrow(plot_df))
+        } else {
+          Reduce(
+            `|`,
+            purrr::map(segment_filter_cols, ~ grepl(segment_filter, plot_df[[.x]], ignore.case = TRUE))
+          )
+        }
+        dplyr::filter(plot_df, segment_keep)
+      },
+      error = function(e) {
+        warning(glue::glue("Segment filter '{segment_filter}' could not be evaluated for {file_stub}: {conditionMessage(e)}."))
+        plot_df[0, , drop = FALSE]
+      }
+    )
+  }
+
+  if (nrow(plot_df) == 0) {
+    message(glue::glue("Skipping {file_stub}: segment filter removed all samples."))
+    summary_row$status <- "skipped_no_samples"
+    summary_row$reason <- "Segment filter removed all samples."
+    return(list(summary = summary_row, missing = missing_tbl))
+  }
+
+  x_col <- if (nzchar(x_col_override) && x_col_override %in% names(plot_df)) {
+    x_col_override
+  } else if (boxplot_x_col %in% names(plot_df)) {
+    boxplot_x_col
+  } else {
+    col_disease
+  }
+  color_col <- if (nzchar(color_col_override) && color_col_override %in% names(plot_df)) {
+    color_col_override
+  } else if (boxplot_color_col %in% names(plot_df)) {
+    boxplot_color_col
+  } else {
+    x_col
+  }
+
+  plot_df[[x_col]] <- factor(plot_df[[x_col]])
+  plot_df[[color_col]] <- factor(plot_df[[color_col]])
+
+  disease_levels <- if (col_disease %in% names(plot_df)) {
+    sort(unique(as.character(stats::na.omit(plot_df[[col_disease]]))))
+  } else {
+    sort(unique(as.character(stats::na.omit(plot_df[[x_col]]))))
+  }
+  summary_row$disease_status_levels <- ifelse(length(disease_levels) > 0, paste(disease_levels, collapse = "; "), "<none>")
+  summary_row$boxplot_x_column <- x_col
+  summary_row$boxplot_color_column <- color_col
+  summary_row$boxplot_facet_column <- ifelse(nzchar(boxplot_facet_col) && boxplot_facet_col %in% names(plot_df), boxplot_facet_col, "<none>")
+  summary_row$samples_plotted <- dplyr::n_distinct(plot_df$sample_id)
+
+  observed_x_levels <- sort(unique(as.character(stats::na.omit(plot_df[[x_col]]))))
+  if (length(observed_x_levels) < 2) {
+    # A single-group panel is still informative: it shows the top-gene
+    # distributions within this segment. Render it with a brief note instead of
+    # skipping, so every segment tab produces a figure.
+    single_group_note <- glue::glue(
+      "Only one `{metadata_label(x_col)}` group ({paste(observed_x_levels, collapse = '; ')}) is present in this panel, ",
+      "so the boxes summarise the top genes within that single group rather than comparing groups."
+    )
+    emit_markdown(glue::glue("\n\n::: {{.callout-note}}\n{single_group_note}\n:::\n"))
+  }
+
+  compact_panel_title <- panel_title %>%
+    as.character() %>%
+    stringr::str_replace_all("\\s*\\n\\s*", "\n") %>%
+    stringr::str_wrap(width = 42)
+
+  p <- ggplot(plot_df, aes(x = .data[[x_col]], y = .data$expression)) +
+    geom_boxplot(width = 0.45, alpha = 0.25, outlier.shape = NA, na.rm = TRUE, color = "#4D4D4D", fill = "#D9D9D9") +
+    geom_point(aes(color = .data[[color_col]]), position = ggplot2::position_jitter(width = 0.15, height = 0), alpha = 0.7, size = 1.8, na.rm = TRUE) +
+    facet_wrap(~gene, scales = "free_y", ncol = params$facet_ncol) +
+    scale_color_manual(values = stage6_discrete_palette(levels(plot_df[[color_col]])), drop = FALSE) +
+    labs(
+      title = compact_panel_title,
+      x = metadata_label(x_col),
+      y = "Expression",
+      color = metadata_label(color_col)
+    ) +
+    theme_minimal(base_family = protocol_font_family, base_size = 11) +
+    theme(
+      text = element_text(family = protocol_font_family),
+      axis.text.x = element_text(angle = 35, hjust = 1),
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(face = "bold", size = 10, lineheight = 0.95),
+      strip.text = element_text(face = "bold")
+    )
+
+  if (nzchar(boxplot_facet_col) && boxplot_facet_col %in% names(plot_df)) {
+    p <- p + facet_grid(stats::as.formula(paste(boxplot_facet_col, "~ gene")), scales = "free_y")
+  }
+
+  pdf_path <- fs::path(out_dir, paste0(file_stub, ".pdf"))
+  png_path <- fs::path(out_dir, paste0(file_stub, ".png"))
+
+  ggsave(
+    pdf_path,
+    p,
+    width = params$fig_width_standard,
+    height = params$fig_height_standard,
+    bg = "white",
+    device = protocol_pdf_device
+  )
+  ggsave(png_path, p, width = params$fig_width_standard, height = params$fig_height_standard, dpi = 300, bg = "white")
+
+  summary_row$output_pdf <- as.character(pdf_path)
+  summary_row$output_png <- as.character(png_path)
+  summary_row$status <- "plotted"
+  summary_row$reason <- "Generated."
+
+  figure_caption <- gene_panel_caption(plot_family, scope, segment_filter, segment_label, segment_column, contrast_name, x_col, color_col)
+  display_saved_figure(png_path, figure_caption)
+  list(summary = summary_row, missing = missing_tbl)
+}
+
+regex_escape <- function(x) {
+  gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", as.character(x))
+}
+
+# Decide whether per-segment top-gene tabs would be redundant for a contrast.
+# Emily's case: when segment is the contrast axis (or there is no segment column
+# distinct from the grouping/x-axis), the per-segment strip just repeats the panel
+# or collapses each tab to a single contrast arm. `pd` should be the contrast-matched
+# metadata so the "collapses within this contrast" check is meaningful.
+segment_axis_is_redundant <- function(segment_column, pd) {
+  if (is.null(segment_column) || length(segment_column) != 1 ||
+      is.na(segment_column) || !nzchar(segment_column)) {
+    return(list(redundant = TRUE,
+                reason = "No distinct segment metadata column was available to stratify by."))
+  }
+  if (identical(segment_column, boxplot_x_col)) {
+    return(list(redundant = TRUE,
+                reason = glue::glue("The segment column ('{segment_column}') is the boxplot x-axis column, so per-segment tabs would duplicate the panel groups.")))
+  }
+  if (identical(segment_column, contrast_factor)) {
+    return(list(redundant = TRUE,
+                reason = glue::glue("The segment column ('{segment_column}') is the contrast factor, so segment is already built into the contrasts.")))
+  }
+  if (segment_column %in% names(pd)) {
+    vals <- as.character(pd[[segment_column]])
+    vals <- vals[!is.na(vals) & nzchar(trimws(vals))]
+    if (dplyr::n_distinct(vals) <= 1) {
+      return(list(redundant = TRUE,
+                  reason = glue::glue("The segment column ('{segment_column}') has one or fewer levels among this contrast's matched samples, so per-segment tabs add nothing.")))
+    }
+  }
+  list(redundant = FALSE, reason = "")
+}
+
+resolve_boxplot_segment_column <- function(pd) {
+  candidate_cols <- unique(c(col_segment, col_cell_type))
+  candidate_cols <- candidate_cols[candidate_cols %in% names(pd)]
+  if (length(candidate_cols) == 0) {
+    return(list(column = NA_character_, levels = character()))
+  }
+
+  level_tbl <- purrr::map_dfr(candidate_cols, function(candidate_col) {
+    values <- as.character(pd[[candidate_col]])
+    values <- values[!is.na(values) & nzchar(trimws(values))]
+    tibble::tibble(
+      column = candidate_col,
+      n_levels = dplyr::n_distinct(values),
+      n_samples = length(values),
+      has_multiple_levels = dplyr::n_distinct(values) > 1,
+      values_are_sample_unique = length(values) > 0 && dplyr::n_distinct(values) == length(values)
+    )
+  }) %>%
+    dplyr::filter(.data$n_levels > 0)
+
+  if (nrow(level_tbl) == 0) {
+    return(list(column = NA_character_, levels = character()))
+  }
+
+  selected_col <- level_tbl %>%
+    dplyr::arrange(dplyr::desc(.data$has_multiple_levels), .data$values_are_sample_unique, dplyr::desc(.data$column == col_segment), .data$n_levels) %>%
+    dplyr::slice_head(n = 1) %>%
+    dplyr::pull(.data$column)
+
+  levels <- as.character(pd[[selected_col]])
+  levels <- sort(unique(levels[!is.na(levels) & nzchar(trimws(levels))]))
+
+  if (nzchar(params$selected_segment_regex)) {
+    levels <- tryCatch(
+      levels[stringr::str_detect(levels, stringr::regex(params$selected_segment_regex, ignore_case = TRUE))],
+      error = function(e) {
+        warning(glue::glue("selected_segment_regex could not be evaluated for top-gene segment tabs: {conditionMessage(e)}. No segment tabs will be generated."))
+        character()
+      }
+    )
+  }
+
+  list(column = selected_col, levels = levels)
+}
+
+plot_top_gene_segment_panels <- function(genes, contrast_name) {
+  segment_resolution <- resolve_boxplot_segment_column(selected_pheno_df)
+  contrast_label <- selected_contrast_heatmap_label(contrast_name)
+  contrast_panel <- resolve_contrast_panel_metadata(contrast_name, selected_pheno_df)
+  panel_pheno_df <- contrast_panel$data
+  panel_x_col <- contrast_panel$x_col
+  panel_color_col <- contrast_panel$color_col
+
+  if (!identical(contrast_panel$status, "resolved")) {
+    skip_status <- if (identical(contrast_panel$status, "insufficient_contrast_arms")) {
+      "skipped_one_contrast_arm"
+    } else {
+      "skipped_unresolved_contrast_metadata"
+    }
+    summary_row <- make_plot_summary(
+      source_label = glue::glue("top_genes:{contrast_name}:contrast_filter"),
+      plot_family = "top_genes",
+      contrast_name = contrast_name,
+      scope = "all_samples",
+      file_stub = sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_skipped")),
+      requested_genes = length(unique(genes)),
+      contrast_label = contrast_label,
+      boxplot_x_column = boxplot_x_col,
+      boxplot_color_column = boxplot_color_col,
+      status = skip_status,
+      reason = contrast_panel$reason
+    )
+    emit_markdown(glue::glue("\n\n::: {{.callout-note}}\nTop-gene boxplots skipped for this contrast. {contrast_panel$reason}\n:::\n"))
+    return(list(summaries = list(summary_row), missing = list()))
+  }
+
+  # Decide whether to emit the per-segment tab strip. Under "auto" we suppress it
+  # when the segment axis is redundant with the contrast/grouping axis (Emily's case:
+  # segment built into the contrasts). "always"/"never" force the prior behaviour.
+  seg_redundancy <- segment_axis_is_redundant(segment_resolution$column, panel_pheno_df)
+  emit_segment_tabs <- switch(
+    boxplot_segment_tabs,
+    always = TRUE,
+    never  = FALSE,
+    auto   = !seg_redundancy$redundant,
+    !seg_redundancy$redundant
+  )
+  no_tabs_reason <- if (identical(boxplot_segment_tabs, "never")) {
+    "Per-segment tabs are disabled (`boxplot_segment_tabs: \"never\"`)."
+  } else {
+    seg_redundancy$reason
+  }
+
+  summaries <- list()
+  missing <- list()
+
+  if (emit_segment_tabs) {
+    emit_markdown("\n\n::: {.panel-tabset}\n\n")
+    emit_markdown("\n\n##### All matched samples\n\n")
+    emit_markdown(glue::glue(
+      "\n\n::: {{.callout-note collapse=\"true\"}}\n",
+      "The all matched samples tab uses every sample assigned to the Stage 5 contrast arms for this contrast before any segment-specific subset is applied. ",
+      "{contrast_panel$reason}\n",
+      ":::\n\n"
+    ))
+  } else {
+    emit_markdown(glue::glue(
+      "\n\n::: {{.callout-note}}\n",
+      "Showing all matched samples only; per-segment tabs were not generated for this contrast. {no_tabs_reason}\n",
+      ":::\n\n"
+    ))
+  }
+
+  all_samples_stub <- sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_all_samples"))
+  all_samples_result <- plot_gene_panel(
+    genes = genes,
+    panel_title = glue::glue("Top {length(genes)} DE genes\n{selected_contrast_display_label(contrast_name)} | all matched samples"),
+    out_dir = out_figures_top_all,
+    file_stub = all_samples_stub,
+    source_label = glue::glue("top_genes:{contrast_name}:all_samples"),
+    plot_family = "top_genes",
+    contrast_name = contrast_name,
+    scope = "all_samples",
+    segment_filter = "",
+    segment_label = "All matched samples",
+    segment_column = "",
+    plot_pheno_df = panel_pheno_df,
+    x_col_override = panel_x_col,
+    color_col_override = panel_color_col
+  )
+  all_samples_result$summary$reason <- stringr::str_squish(glue::glue(
+    "All matched samples panel generated{ifelse(emit_segment_tabs, ' before segment-specific tabs', ' (per-segment tabs suppressed)')}. {contrast_panel$reason} {all_samples_result$summary$reason}"
+  ))
+  summaries <- c(summaries, list(all_samples_result$summary))
+  missing <- c(missing, list(all_samples_result$missing))
+
+  # Auto/never suppressed the strip: emit only the all-samples panel and record it.
+  if (!emit_segment_tabs) {
+    suppressed_row <- make_plot_summary(
+      source_label = glue::glue("top_genes:{contrast_name}:segment_tabs"),
+      plot_family = "top_genes",
+      contrast_name = contrast_name,
+      scope = "segment_filtered",
+      file_stub = sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_segment_tabs_suppressed")),
+      requested_genes = length(unique(genes)),
+      contrast_label = contrast_label,
+      boxplot_x_column = boxplot_x_col,
+      boxplot_color_column = boxplot_color_col,
+      status = "segment_tabs_suppressed",
+      reason = no_tabs_reason
+    )
+    summaries <- c(summaries, list(suppressed_row))
+    return(list(summaries = summaries, missing = missing))
+  }
+
+  if (length(segment_resolution$levels) == 0 || is.na(segment_resolution$column)) {
+    summary_row <- make_plot_summary(
+      source_label = glue::glue("top_genes:{contrast_name}:segment_tabs"),
+      plot_family = "top_genes",
+      contrast_name = contrast_name,
+      scope = "segment_filtered",
+      file_stub = sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_skipped")),
+      requested_genes = length(unique(genes)),
+      segment_filter = ifelse(nzchar(params$selected_segment_regex), params$selected_segment_regex, "<all observed segments>"),
+      contrast_label = contrast_label,
+      status = "skipped_no_segment_levels",
+      reason = "No observed segment or staining levels were available for top-gene segment tabs."
+    )
+    emit_markdown(glue::glue("\n\n::: {{.callout-note}}\nSegment-specific tabs were skipped. {summary_row$reason}\n:::\n"))
+    summaries <- c(summaries, list(summary_row))
+    emit_markdown("\n\n:::\n\n")
+    return(list(summaries = summaries, missing = missing))
+  }
+
+  for (segment_label in segment_resolution$levels) {
+    emit_markdown(glue::glue("\n\n##### {segment_label}\n\n"))
+    segment_filter <- glue::glue("^{regex_escape(segment_label)}$")
+    segment_stub <- sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_{segment_label}"))
+
+    result <- plot_gene_panel(
+      genes = genes,
+      panel_title = glue::glue("Top {length(genes)} DE genes\n{selected_contrast_display_label(contrast_name)} | {segment_label}"),
+      out_dir = out_figures_top_segment,
+      file_stub = segment_stub,
+      source_label = glue::glue("top_genes:{contrast_name}:{segment_label}"),
+      plot_family = "top_genes",
+      contrast_name = contrast_name,
+      scope = "segment_filtered",
+      segment_filter = segment_filter,
+      segment_label = segment_label,
+      segment_column = segment_resolution$column,
+      plot_pheno_df = panel_pheno_df,
+      x_col_override = panel_x_col,
+      color_col_override = panel_color_col
+    )
+
+    result$summary$reason <- stringr::str_squish(glue::glue(
+      "Segment tab generated from metadata column '{segment_resolution$column}'. {result$summary$reason}"
+    ))
+    summaries <- c(summaries, list(result$summary))
+    missing <- c(missing, list(result$missing))
+  }
+
+  emit_markdown("\n\n:::\n\n")
+
+  list(summaries = summaries, missing = missing)
+}
+
+make_selected_contrast_heatmap <- function(contrast_name, de_table, selected_expression_object) {
+  selected_heatmap_adj_p_cutoff <- suppressWarnings(as.numeric(params$selected_heatmap_adj_p_cutoff))
+  if (!is.finite(selected_heatmap_adj_p_cutoff)) {
+    return(make_visual_result(status = "failed", reason = "selected_heatmap_adj_p_cutoff must be numeric."))
+  }
+
+  selected_heatmap_tbl <- standardise_de_table(de_table)
+  if (is.null(selected_heatmap_tbl) || !"adj.P.Val" %in% names(selected_heatmap_tbl)) {
+    return(make_visual_result(status = "skipped", reason = glue::glue("Contrast '{contrast_name}' does not contain a usable adjusted P-value column.")))
+  }
+
+  heatmap_genes <- selected_heatmap_tbl %>%
+    dplyr::filter(
+      is.finite(.data$adj.P.Val),
+      is.finite(.data$logFC),
+      .data$adj.P.Val < selected_heatmap_adj_p_cutoff
+    ) %>%
+    dplyr::arrange(.data$adj.P.Val, dplyr::desc(abs(.data$logFC))) %>%
+    dplyr::slice_head(n = params$heatmap_max_genes) %>%
+    dplyr::pull(.data$gene) %>%
+    unique()
+
+  heatmap_matrix <- get_expr_mat(selected_expression_object)
+  heatmap_genes <- intersect(heatmap_genes, rownames(heatmap_matrix))
+  heatmap_pheno <- get_pheno(selected_expression_object)
+  segment_resolution <- infer_segment_filter(
+    contrast_name,
+    unique(c(heatmap_pheno[[col_segment]], heatmap_pheno[[col_cell_type]]))
+  )
+
+  if (nzchar(segment_resolution$filter)) {
+    heatmap_filter_cols <- unique(c(col_segment, col_cell_type))
+    heatmap_filter_cols <- heatmap_filter_cols[heatmap_filter_cols %in% names(heatmap_pheno)]
+    segment_keep <- tryCatch(
+      {
+        if (length(heatmap_filter_cols) == 0) {
+          rep(FALSE, nrow(heatmap_pheno))
+        } else {
+          Reduce(
+            `|`,
+            purrr::map(heatmap_filter_cols, ~ grepl(segment_resolution$filter, heatmap_pheno[[.x]], ignore.case = TRUE))
+          )
+        }
+      },
+      error = function(e) {
+        warning(glue::glue("Selected heatmap segment filter could not be evaluated: {conditionMessage(e)}. Using all samples."))
+        rep(TRUE, nrow(heatmap_pheno))
+      }
+    )
+    heatmap_pheno <- heatmap_pheno[segment_keep, , drop = FALSE]
+  }
+
+  heatmap_sample_ids <- intersect(rownames(heatmap_pheno), colnames(heatmap_matrix))
+  if (length(heatmap_genes) < 2 || length(heatmap_sample_ids) < 2) {
+    return(make_visual_result(
+      status = "skipped",
+      reason = glue::glue(
+        "At least two genes and two samples are required after selected-method filtering; found ",
+        "{length(heatmap_genes)} gene(s) and {length(heatmap_sample_ids)} sample(s)."
+      ),
+      genes_plotted = length(heatmap_genes),
+      samples_plotted = length(heatmap_sample_ids)
+    ))
+  }
+
+  heatmap_pheno <- heatmap_pheno[heatmap_sample_ids, , drop = FALSE]
+  heatmap_matrix <- heatmap_matrix[heatmap_genes, heatmap_sample_ids, drop = FALSE]
+  heatmap_matrix[!is.finite(heatmap_matrix)] <- NA_real_
+  heatmap_matrix <- heatmap_matrix[rowSums(is.na(heatmap_matrix)) == 0, , drop = FALSE]
+
+  if (nrow(heatmap_matrix) < 2) {
+    return(make_visual_result(
+      status = "skipped",
+      reason = "Fewer than two complete genes remained after removing non-finite values.",
+      genes_plotted = nrow(heatmap_matrix),
+      samples_plotted = ncol(heatmap_matrix)
+    ))
+  }
+
+  annotation_cols <- unique(c(col_cell_type, col_disease, col_segment, col_patient))
+  annotation_cols <- annotation_cols[annotation_cols %in% names(heatmap_pheno)]
+  annotation_df <- if (length(annotation_cols) > 0) {
+    as.data.frame(heatmap_pheno[, annotation_cols, drop = FALSE])
+  } else {
+    NULL
+  }
+
+  # Protocol divergent palette (accessible Okabe-Ito blue -> near-white ->
+  # vermillion), replacing pheatmap's default RdYlBu so the DE heatmap matches the
+  # volcano and DE summary bars. scale = "row" makes values divergent around 0, so
+  # breaks are made symmetric to keep the near-white midpoint pinned at no change.
+  heatmap_scaled <- t(scale(t(heatmap_matrix)))
+  heatmap_absmax <- max(abs(heatmap_scaled[is.finite(heatmap_scaled)]))
+  if (!is.finite(heatmap_absmax) || heatmap_absmax == 0) heatmap_absmax <- 1
+  heatmap_colors <- grDevices::colorRampPalette(unname(protocol_divergent_palette()))(100)
+  heatmap_breaks <- seq(-heatmap_absmax, heatmap_absmax, length.out = length(heatmap_colors) + 1L)
+
+  heatmap_obj <- pheatmap::pheatmap(
+    heatmap_matrix,
+    scale = "row",
+    color = heatmap_colors,
+    breaks = heatmap_breaks,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    show_rownames = nrow(heatmap_matrix) <= 50,
+    show_colnames = FALSE,
+    fontsize = expression_heatmap_base_font_size,
+    fontsize_row = expression_heatmap_label_font_size,
+    fontsize_col = expression_heatmap_label_font_size,
+    treeheight_row = 28,
+    treeheight_col = 28,
+    border_color = NA,
+    annotation_col = annotation_df,
+    main = glue::glue("{selected_de_method}: {selected_contrast_heatmap_title(contrast_name)}"),
+    silent = TRUE
+  )
+
+  heatmap_gtable <- heatmap_obj$gtable
+  if (is.null(heatmap_gtable) && length(heatmap_obj) >= 4) {
+    heatmap_gtable <- heatmap_obj[[4]]
+  }
+  if (is.null(heatmap_gtable)) {
+    return(make_visual_result(
+      status = "failed",
+      reason = "pheatmap() completed but did not return a drawable gtable object.",
+      genes_plotted = nrow(heatmap_matrix),
+      samples_plotted = ncol(heatmap_matrix)
+    ))
+  }
+
+  selected_out_files <- save_grid_plot(
+    grob = heatmap_gtable,
+    file_base = fs::path(
+      out_figures_de,
+      bounded_file_stem(
+        "selected_contrast_heatmap",
+        selected_de_method,
+        short_file_hash(selected_de_method, contrast_name),
+        max_chars = 72
+      )
+    ),
+    width = params$fig_width_wide,
+    height = params$fig_height_wide
+  )
+
+  make_visual_result(
+    plot = heatmap_gtable,
+    status = "generated",
+    output_file = selected_out_files,
+    genes_plotted = nrow(heatmap_matrix),
+    samples_plotted = ncol(heatmap_matrix)
+  )
+}
+```
+
+## Load stage 5 DE outputs
+
+::: {.callout-note}
+## Why this section matters
+The table below lists the stage 5 result files that this visualisation notebook expects. Missing methods are allowed when the user intentionally ran a smaller method set in stage 5; they are reported so later comparisons remain clear.
+:::
+
+```{r}
+#| label: load-5a-method-results
+
+method_file_status <- tibble::tribble(
+  ~method_name, ~file_name,
+  "dream_GeoDiffCounts", "dream_results.RDS",
+  "limma_voom_TMM", "limma_voom_TMM_results.RDS",
+  "limma_voom_GeoDiff", "limma_voom_GeoDiff_results.RDS",
+  "limma_trend_Q3", "limma_trend_Q3_results.RDS",
+  "limma_trend_GeoDiff", "limma_trend_GeoDiff_results.RDS"
+) %>%
+  dplyr::mutate(
+    file_path = fs::path(de_5a_dir, .data$file_name),
+    file_exists = file.exists(.data$file_path)
+  )
+
+readr::write_csv(method_file_status, fs::path(out_tables, "method_availability_from_5a.csv"))
+
+protocol_datatable(
+  method_file_status,
+  caption = "Expected stage 5 method result files and availability for this stage 6 render",
+  page_length = 5
+)
+
+available_methods <- method_file_status %>% dplyr::filter(.data$file_exists)
+if (nrow(available_methods) == 0) {
+  stop(
+    "No stage 5 DE result files were found. Run 5_Differential_Expression_Calculation.qmd first or check params$project_root and params$de_calc_stage.",
+    call. = FALSE
+  )
+}
+
+method_results <- purrr::set_names(vector("list", nrow(available_methods)), available_methods$method_name)
+for (i in seq_len(nrow(available_methods))) {
+  method_results[[available_methods$method_name[[i]]]] <- readRDS(available_methods$file_path[[i]])
+}
+
+message(sprintf("Loaded %d method result object(s): %s", length(method_results), paste(names(method_results), collapse = ", ")))
+```
+
+## Load normalised spatial data
+
+::: {.callout-note}
+## What these expression objects are used for
+The expression objects loaded here are used only for heatmap and gene-level plots of genes already identified from stage 5 result tables. This section does not estimate model parameters, modify contrasts, or recompute DE statistics.
+:::
+
+```{r}
+#| label: load-expression-objects-for-visualisation
+#| message: false
+#| warning: false
+
+expression_file_status <- tibble::tribble(
+  ~object_name, ~file_path,
+  "Q3", norm_input_path,
+  "GeoDiff", norm_geodiff_input_path,
+  "TMM", norm_tmm_input_path
+) %>%
+  dplyr::mutate(file_exists = file.exists(.data$file_path))
+
+readr::write_csv(expression_file_status, fs::path(out_tables, "visualisation_expression_object_availability.csv"))
+
+protocol_datatable(
+  expression_file_status,
+  caption = "Normalised expression objects used for stage 6 heatmap and gene-level figures",
+  page_length = 5
+)
+
+expression_objects <- list()
+for (i in seq_len(nrow(expression_file_status))) {
+  object_name <- expression_file_status$object_name[[i]]
+  object_path <- expression_file_status$file_path[[i]]
+  if (!file.exists(object_path)) {
+    message(glue::glue("Expression object '{object_name}' was not found at {object_path}; heatmap and gene-level figures requiring it will be skipped."))
+    next
+  }
+  expression_objects[[object_name]] <- suppressPackageStartupMessages(
+    suppressMessages(
+      prepare_visualisation_metadata(readRDS(object_path))
+    )
+  )
+}
+
+if (length(expression_objects) == 0) {
+  message("No normalised expression objects were available. DE summary and volcano plots will still run, but heatmap and gene-level figures will be skipped.")
+}
+
+stain_pattern_for_de_summary <- trimws(as.character(if (is.null(params$stain_regex_override)) "" else params$stain_regex_override))
+if (!nzchar(stain_pattern_for_de_summary) && length(expression_objects) > 0) {
+  observed_segments <- expression_objects %>%
+    purrr::map(function(obj) {
+      pd <- get_pheno(obj)
+      if (!col_segment %in% names(pd)) {
+        return(character())
+      }
+      as.character(stats::na.omit(unique(pd[[col_segment]])))
+    }) %>%
+    unlist(use.names = FALSE) %>%
+    unique()
+
+  observed_segments <- observed_segments[nzchar(observed_segments)]
+  if (length(observed_segments) > 0) {
+    stain_pattern_for_de_summary <- observed_segments %>%
+      stringr::str_replace_all("([.|()\\^{}+$*?\\[\\]\\\\])", "\\\\\\1") %>%
+      paste(collapse = "|")
+  }
+}
+
+message(sprintf(
+  "Using stain/segment pattern for DE summary faceting: %s",
+  ifelse(nzchar(stain_pattern_for_de_summary), stain_pattern_for_de_summary, "<not available>")
+))
+```
+
+## Metadata checkpoint
+
+::: {.callout-note}
+## Why this section matters
+Heatmap and gene-level panels use sample metadata only for annotation and coloring. Review this checkpoint before interpreting visual separation by disease status, segment, patient, or slide.
+:::
+
+```{r}
+#| label: metadata-column-resolution
+#| results: asis
+#| warning: false
+
+metadata_checkpoint <- purrr::imap_dfr(expression_objects, function(obj, object_name) {
+  pd <- get_pheno(obj)
+  tibble::tibble(
+    expression_object = object_name,
+    n_samples = nrow(pd),
+    slide_column = col_slide,
+    slide_levels = if (col_slide %in% names(pd)) dplyr::n_distinct(pd[[col_slide]], na.rm = TRUE) else NA_integer_,
+    patient_column = col_patient,
+    patient_levels = if (col_patient %in% names(pd)) dplyr::n_distinct(pd[[col_patient]], na.rm = TRUE) else NA_integer_,
+    disease_status_column = col_disease,
+    disease_status_levels = if (col_disease %in% names(pd)) dplyr::n_distinct(pd[[col_disease]], na.rm = TRUE) else NA_integer_,
+    cell_type_column = col_cell_type,
+    cell_type_levels = if (col_cell_type %in% names(pd)) dplyr::n_distinct(pd[[col_cell_type]], na.rm = TRUE) else NA_integer_,
+    segment_column = col_segment,
+    segment_levels = if (col_segment %in% names(pd)) dplyr::n_distinct(pd[[col_segment]], na.rm = TRUE) else NA_integer_
+  )
+})
+
+if (nrow(metadata_checkpoint) == 0) {
+  protocol_datatable(
+    tibble::tibble(note = "No expression objects were loaded, so metadata annotation checks could not be produced."),
+    caption = "Metadata checkpoint",
+    page_length = 1
+  )
+} else {
+protocol_datatable(
+    metadata_checkpoint,
+    caption = "Metadata columns used for stage 6 heatmap and selected gene-panel annotation",
+    page_length = min(10, nrow(metadata_checkpoint)),
+    scroll_y = "360px"
+  )
+}
+```
+
+## Method and contrast inventory
+
+```{r}
+#| label: method-contrast-inventory
+
+method_inventory <- method_contrast_summary(method_results)
+
+readr::write_csv(method_inventory, fs::path(out_tables, "method_contrast_inventory.csv"))
+readr::write_csv(method_inventory, fs::path(out_results_de, "method_contrast_inventory.csv"))
+
+protocol_datatable(
+  method_inventory,
+  caption = "Method/contrast inventory loaded from stage 5 outputs",
+  page_length = 15,
+  scroll_y = "420px"
+)
+```
+
+::: {.callout-important collapse="true"}
+## Decision checkpoint
+Check that the methods and contrasts listed above match your intended stage 5 render. If a method is absent because it was intentionally disabled in stage 5, comparisons below will use the remaining method set.
+:::
+
+## DE signal summary
+
+```{r}
+#| label: de-signal-summary
+#| results: asis
+#| warning: false
+
+method_summary <- method_inventory %>%
+  dplyr::group_by(.data$method_name) %>%
+  dplyr::summarise(
+    n_contrasts = dplyr::n(),
+    total_significant_gene_contrast_hits = sum(.data$n_significant, na.rm = TRUE),
+    median_significant_per_contrast = stats::median(.data$n_significant, na.rm = TRUE),
+    max_significant_in_one_contrast = max(.data$n_significant, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+readr::write_csv(method_summary, fs::path(out_results_de, "method_signal_summary.csv"))
+
+protocol_datatable(
+  method_summary,
+  caption = "DE signal summary by method using the selected adjusted P-value and logFC thresholds",
+  page_length = min(10, nrow(method_summary))
+)
+
+signal_plot <- ggplot(method_inventory, aes(x = .data$method_name, y = .data$n_significant, fill = .data$method_name)) +
+  geom_boxplot(alpha = 0.55, outlier.shape = NA) +
+  geom_jitter(width = 0.15, height = 0, alpha = 0.75, size = 2) +
+  labs(
+    title = "Distribution of significant DE genes by method",
+    x = "DE method",
+    y = "Significant genes per contrast"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    text = element_text(family = "Segoe UI"),
+    legend.position = "none",
+    axis.text.x = element_text(angle = 30, hjust = 1, size = 8),
+    plot.title = element_text(size = 11, face = "bold"),
+    axis.title = element_text(size = 9)
+  )
+
+signal_plot_file <- fs::path(out_figures_de, "significant_gene_counts_by_method.png")
+ggsave(
+  filename = signal_plot_file,
+  plot = signal_plot,
+  width = params$fig_width_standard,
+  height = params$fig_height_standard,
+  dpi = 300,
+  bg = "white"
+)
+
+display_saved_figure(
+  signal_plot_file,
+  "Distribution of significant differentially expressed genes per contrast by method. Wider or more variable distributions should be reviewed alongside the method inventory before choosing results for later interpretation."
+)
+```
+
+## DE genes for configured contrasts
+
+### Method-family visual summaries
+
+::: {.callout-important collapse="true"}
+## How to use these plots
+These plots support model comparison and review. A method with visually stronger signal is not automatically "best"; use these figures alongside the method inventory, overlap summaries, correlation heatmaps, and later pathway results.
+:::
+
+::: {.callout-tip}
+## Comparing differential-expression branches
+The result-summary, volcano, and heatmap tabs below share linked tabs. Selecting a method in any group switches the other two groups to the same Stage 5 branch, so you can review the matching evidence together without scrolling back to an earlier set of tabs.
+:::
+
+```{r}
+#| label: prepare-method-family-visualisations
+#| include: false
+
+visualisation_audit <- list()
+core_visualisations <- list()
+core_de_gene_summaries <- list()
+
+safe_plot_call <- function(expr, label) {
+  tryCatch(
+    expr,
+    error = function(e) {
+      message(glue::glue("{label} failed: {conditionMessage(e)}"))
+      make_visual_result(status = "failed", reason = conditionMessage(e))
+    }
+  )
+}
+
+for (method_name in names(method_results)) {
+  method_label <- method_display_label(method_name)
+  message(glue::glue("Generating stage 6 method-family visualisations for {method_name}."))
+
+  de_summary_plot <- safe_plot_call(
+    plot_de_summary_panel(method_results[[method_name]], method_name),
+    glue::glue("DE summary panel for {method_name}")
+  )
+
+  volcano_grid <- safe_plot_call(
+    plot_volcano_grid(method_results[[method_name]], method_name),
+    glue::glue("Volcano grid for {method_name}")
+  )
+
+  method_de_gene_summary <- method_inventory %>%
+    dplyr::filter(.data$method_name == method_name) %>%
+    dplyr::select(
+      contrast,
+      n_genes,
+      n_significant,
+      n_up,
+      n_down,
+      min_adj_p
+    ) %>%
+    dplyr::arrange(dplyr::desc(.data$n_significant), .data$contrast)
+
+  expression_object_name <- method_expression_object_name(method_name)
+  expression_object <- expression_objects[[expression_object_name]]
+
+  if (is.null(expression_object)) {
+    missing_reason <- glue::glue("Expression object '{expression_object_name}' is unavailable.")
+    message(glue::glue("Skipping heatmap for {method_name}: {missing_reason}"))
+    heatmap_plot <- make_visual_result(status = "skipped", reason = missing_reason)
+  } else {
+    heatmap_plot <- safe_plot_call(
+      plot_heatmap_for_method(method_results[[method_name]], method_name, expression_object),
+      glue::glue("Heatmap for {method_name}")
+    )
+  }
+
+  core_visualisations[[method_name]] <- list(
+    de_summary = de_summary_plot,
+    volcano = volcano_grid,
+    heatmap = heatmap_plot,
+    expression_object_name = expression_object_name
+  )
+  core_de_gene_summaries[[method_name]] <- method_de_gene_summary
+
+  heatmap_audit <- visual_result_to_audit(heatmap_plot, method_name, "Heatmap", expression_object_name) %>%
+    dplyr::mutate(
+      heatmap_gene_limit = params$core_heatmap_max_genes,
+      heatmap_limit_parameter = "core_heatmap_max_genes",
+      ranking_basis = "Maximum -log10(adjusted P-value) multiplied by absolute logFC across significant stage 5 contrasts"
+    )
+
+  visualisation_audit[[method_name]] <- dplyr::bind_rows(
+    visual_result_to_audit(de_summary_plot, method_name, "DE summary panel", NA_character_),
+    visual_result_to_audit(volcano_grid, method_name, "Volcano grid", NA_character_),
+    heatmap_audit
+  )
+}
+
+visualisation_audit_df <- dplyr::bind_rows(visualisation_audit)
+readr::write_csv(visualisation_audit_df, fs::path(out_tables, "core_visualisation_audit.csv"))
+
+emit_method_figure_tabset <- function(plot_key, figure_title, caption_fn) {
+  # Native Quarto tab grouping: tabs with the same title across every tabset in
+  # this group switch together (no custom JS file needed).
+  emit_markdown("\n\n::: {.panel-tabset group=\"de-method-comparison\"}\n\n")
+
+  for (method_name in names(method_results)) {
+    method_label <- method_display_label(method_name)
+    emit_markdown(glue::glue(
+      "\n\n#### {method_label}\n\n",
+      "Stage 5 method object: `{method_name}`\n\n"
+    ))
+    display_visual_result(
+      core_visualisations[[method_name]][[plot_key]],
+      figure_title,
+      caption_fn(method_name, method_label)
+    )
+  }
+
+  emit_markdown("\n\n:::\n\n")
+}
+```
+
+### Differential-expression direction summaries
+
+Use the signed bar summaries to compare the number and direction of significant genes across the configured contrasts. Large differences between methods should trigger review of normalization and model assumptions.
+
+```{r}
+#| label: method-family-result-summaries
+#| results: asis
+#| message: false
+#| warning: false
+
+emit_method_figure_tabset(
+  plot_key = "de_summary",
+  figure_title = "Results summary",
+  caption_fn = function(method_name, method_label) {
+    glue::glue("Differential-expression direction summary for {method_label} from stage 5 object {method_name}. Bars show the number of significant genes per contrast and direction using the configured adjusted P-value and logFC thresholds.")
+  }
+)
+```
+
+### Volcano plots
+
+Compare effect size and adjusted statistical support across the same method branches. Interpret the highlighted genes together with the summary bars and expression heatmaps rather than selecting a method from volcano density alone.
+
+```{r}
+#| label: method-family-volcano-plots
+#| results: asis
+#| message: false
+#| warning: false
+
+emit_method_figure_tabset(
+  plot_key = "volcano",
+  figure_title = "Volcano plots",
+  caption_fn = function(method_name, method_label) {
+    glue::glue("Volcano plot grid for {method_label} from stage 5 object {method_name}. Each panel compares log2 fold-change effect size against adjusted P-value support for one available contrast. {volcano_threshold_explanation} Axes are determined directly from the plotted data.")
+  }
+)
+```
+
+### Method-family heatmaps
+
+Use these row-scaled expression patterns to assess whether each method's top-ranked significant genes form coherent sample-level structure under the configured metadata annotations.
+
+```{r}
+#| label: method-family-heatmaps
+#| results: asis
+#| message: false
+#| warning: false
+
+emit_method_figure_tabset(
+  plot_key = "heatmap",
+  figure_title = "Heatmap of DE genes",
+  caption_fn = function(method_name, method_label) {
+    glue::glue("Row-scaled heatmap of top-ranked significant DE genes for {method_label} from stage 5 object {method_name}, limited by `core_heatmap_max_genes` ({params$core_heatmap_max_genes}). Genes are ranked across contrasts by adjusted P-value support and absolute effect size. Column annotations use the configured metadata fields.")
+  }
+)
+```
+
+### Per-method DE gene lists
+
+These searchable tables remain separate from the linked figure controls. Use them to check the contrast-level counts underlying the displayed summaries.
+
+```{r}
+#| label: method-family-de-gene-lists
+#| results: asis
+#| message: false
+#| warning: false
+
+# Share the native tab group with the figure tabsets so the gene lists switch
+# together with the figures. Emit STATIC markdown tables: DT htmlwidgets that are
+# print()-ed inside a `results: asis` loop do not emit their JS dependencies, so
+# the per-method tables previously rendered blank / not at all.
+emit_markdown("\n\n::: {.panel-tabset group=\"de-method-comparison\"}\n\n")
+
+for (method_name in names(method_results)) {
+  method_label <- method_display_label(method_name)
+  method_de_gene_summary <- core_de_gene_summaries[[method_name]]
+  emit_markdown(glue::glue("\n\n#### {method_label}\n\nStage 5 method object: `{method_name}`\n\n"))
+
+  if (is.null(method_de_gene_summary) || nrow(method_de_gene_summary) == 0) {
+    emit_markdown("\n\n_No contrast-level DE gene summary was available for this method._\n\n")
+  } else {
+    emit_markdown(paste0(
+      "\n\n",
+      paste(
+        knitr::kable(
+          method_de_gene_summary,
+          # Route through numbered_table_caption() so these per-method tables carry
+          # a "Table N." number like every other Stage 6 table (the figure tabsets
+          # are already numbered per method the same way via numbered_figure_caption).
+          caption = numbered_table_caption(glue::glue("DE gene counts by contrast for {method_label}"))
+        ),
+        collapse = "\n"
+      ),
+      "\n\n"
+    ))
+  }
+}
+
+emit_markdown("\n\n:::\n\n")
+```
+
+### Core visualization checklist
+
+```{r}
+#| label: core-visualisation-audit
+
+protocol_datatable(
+  visualisation_audit_df,
+  caption = "Stage 6 core visualisation checklist",
+  page_length = 10
+)
+```
+
+## Comparing results
+
+### Correlation between methods
+
+These full-matrix correlation heatmaps provide a quick consistency check across differential-expression methods by comparing fold-change and adjusted P-value summaries over shared genes and available contrasts. Hierarchical ordering groups method/contrast outputs that behave similarly. Low agreement does not automatically invalidate a method, but it should trigger a review of model assumptions, contrast definitions, low-power groups, and biological plausibility before later interpretation.
+
+#### Figure legend guide (method-correlation plots)
+
+- **Diagonal values**: self-correlation (= 1.00 by definition).
+- **Off-diagonal values**: agreement between method/contrast outputs across shared genes.
+- **Row and column labels**: method and contrast labels derived from the stage 5 output names and clustered by correlation similarity.
+- **Fold-change panel**: compares `logFC` values. Stable methods and correctly matched contrasts should generally show moderate-to-high positive agreement for related comparisons.
+- **Adjusted P-value panel**: compares the untransformed `adj.P.Val` values returned by `getPvalsDF()`. Agreement may be lower than for fold changes; strong disagreements should be documented and investigated.
+
+::: {.callout-note collapse="true"}
+#### User decision after method-correlation review
+If cross-method agreement is low, do not interpret a single method in isolation. Re-check contrast definitions, low-power comparison groups, normalization choices, and model settings in stage 5, then re-render this stage before final reporting.
+:::
+
+```{r}
+#| label: method-correlation-summaries
+#| results: asis
+#| fig-width: 13
+#| fig-height: 10
+#| warning: false
+if (length(method_results) >= 2) {
+  fc_data <- getFoldChangesDF(method_results)
+  pval_data <- getPvalsDF(method_results)
+
+  saveRDS(fc_data, fs::path(out_results_de, "fold_changes_all_models.rds"))
+  saveRDS(pval_data, fs::path(out_results_de, "pvals_all_models.rds"))
+
+  # Use the safe plotting helper to avoid hclust failures when pairwise
+  # correlations contain NA/NaN/Inf because method columns overlap sparsely.
+  fc_correlation_file <- plot_correlation_heatmap(
+    df_like = fc_data,
+    title = "Fold-change correlation",
+    out_path = fs::path(out_figures_de, "fc_correlation_methods.png")
+  )
+  display_saved_figure(
+    fc_correlation_file,
+    "Full correlation heatmap of logFC summaries across method and contrast outputs. Hierarchically grouped off-diagonal agreement supports consistent effect-size direction across methods, while weak blocks should trigger review of model assumptions and contrast definitions."
+  )
+
+  pval_correlation_file <- plot_correlation_heatmap(
+    df_like = pval_data,
+    title = "P-value correlation",
+    out_path = fs::path(out_figures_de, "pval_correlation_methods.png")
+  )
+  display_saved_figure(
+    pval_correlation_file,
+    "Full correlation heatmap of untransformed adjusted P-value summaries across method and contrast outputs. Divergent off-diagonal structure indicates that adjusted statistical support differs by method and should be documented before later interpretation."
+  )
+}
+```
+
+### Conserved genes across active methods
+
+This summary reports genes that pass the configured adjusted P-value and absolute logFC thresholds in the same contrast across every active method. These conservative, cross-method sets provide a high-confidence review list; users should still inspect effect direction, expression patterns, and model suitability before later interpretation.
+
+```{r}
+#| label: conserved-genes-across-methods
+#| warning: false
+if (length(method_results) >= 2) {
+  contrast_names <- Reduce(intersect, lapply(method_results, names))
+
+  # Use the same standardised significant-gene extraction as the overlap block
+  # below, so gene identity (standardised `gene` column) and NA handling are
+  # consistent across the two cross-method summaries.
+  genes_by_model_contrast <- lapply(method_results, function(model_list) {
+    lapply(model_list[contrast_names], function(tbl) {
+      get_sig_genes(tbl)
+    })
+  })
+
+  conserved <- lapply(contrast_names, function(ct) {
+    sets <- lapply(genes_by_model_contrast, function(model_contrasts) model_contrasts[[ct]])
+    Reduce(intersect, sets)
+  })
+  names(conserved) <- contrast_names
+
+  conserved_df <- tibble::tibble(
+    contrast = names(conserved),
+    n_conserved = lengths(conserved),
+    genes = vapply(conserved, function(x) paste(x, collapse = ";"), character(1))
+  )
+
+  readr::write_csv(conserved_df, fs::path(out_results_de, "conserved_genes_across_models.csv"))
+  saveRDS(conserved, fs::path(out_results_de, "conserved_genes_across_models.rds"))
+}
+```
+
+### DE gene overlap across methods
+
+```{r}
+#| label: de-gene-overlap
+#| results: asis
+#| warning: false
+
+de_genes_by_method <- purrr::map(method_results, function(contrast_list) {
+  unique(unlist(purrr::map(contrast_list, get_sig_genes), use.names = FALSE))
+}) %>%
+  purrr::keep(~ length(.x) > 0)
+
+de_gene_count_table <- tibble::tibble(
+  method_name = names(de_genes_by_method),
+  n_unique_significant_genes = purrr::map_int(de_genes_by_method, length)
+)
+
+readr::write_csv(de_gene_count_table, fs::path(out_results_de, "de_gene_counts_by_method.csv"))
+
+protocol_datatable(
+  de_gene_count_table,
+  caption = "Unique significant DE genes by method across all available contrasts",
+  page_length = min(10, max(1, nrow(de_gene_count_table)))
+)
+
+if (length(de_genes_by_method) > 0) {
+  robust_DE_genes <- Reduce(intersect, de_genes_by_method)
+} else {
+  robust_DE_genes <- character()
+}
+
+writeLines(robust_DE_genes, fs::path(out_results_de, "robust_DE_genes.txt"))
+
+overlap_count_plot_df <- de_gene_count_table %>%
+  dplyr::arrange(.data$n_unique_significant_genes) %>%
+  dplyr::mutate(method_name = factor(.data$method_name, levels = .data$method_name))
+
+overlap_count_plot <- ggplot(
+  overlap_count_plot_df,
+  aes(x = .data$n_unique_significant_genes, y = .data$method_name, fill = .data$method_name)
+) +
+  geom_col(width = 0.66) +
+  geom_text(
+    aes(label = format(.data$n_unique_significant_genes, big.mark = ",")),
+    hjust = -0.18, size = 3.3, colour = "#333333", family = protocol_font_family
+  ) +
+  # Categorical (DE method) -> accessible Okabe-Ito palette.
+  scale_fill_manual(values = stage6_discrete_palette(levels(overlap_count_plot_df$method_name)), guide = "none") +
+  scale_x_continuous(
+    expand = ggplot2::expansion(mult = c(0, 0.14)),
+    labels = function(x) format(x, big.mark = ",")
+  ) +
+  labs(
+    title = "Unique significant DE genes by method",
+    subtitle = glue::glue("Genes with adj. P < {params$adj_p_cutoff} and |log2FC| > {params$logFC_cutoff} in any available contrast"),
+    x = "Unique significant genes",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 11, base_family = protocol_font_family) +
+  theme(
+    text = element_text(family = protocol_font_family),
+    plot.title = element_text(size = 12, face = "bold"),
+    plot.subtitle = element_text(size = 9, colour = "#555555", margin = ggplot2::margin(b = 8)),
+    axis.title.x = element_text(size = 9),
+    axis.text.y = element_text(size = 9.5),
+    axis.text.x = element_text(size = 8.5),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.3, colour = "#ECECEC"),
+    plot.margin = ggplot2::margin(t = 8, r = 16, b = 8, l = 8)
+  )
+
+overlap_count_file <- fs::path(out_figures_de, "de_gene_counts_by_method.png")
+ggsave(
+  filename = overlap_count_file,
+  plot = overlap_count_plot,
+  width = params$fig_width_standard,
+  height = params$fig_height_standard,
+  dpi = 300,
+  bg = "white"
+)
+
+display_saved_figure(
+  overlap_count_file,
+  "Bar plot of unique significant differentially expressed genes recovered by each method across all available contrasts. Large differences in count should be interpreted with the correlation and overlap diagnostics before method selection."
+)
+```
+
+### Venn and UpSet plots
+
+```{r}
+#| label: venn-upset-overlap
+#| message: false
+#| warning: false
+#| results: asis
+
+if (length(de_genes_by_method) >= 2) {
+  if (length(de_genes_by_method) <= 5 && requireNamespace("VennDiagram", quietly = TRUE)) {
+    venn_file <- fs::path(out_figures_de, "DE_genes_model_comparisons.png")
+    suppressMessages(
+      suppressWarnings(
+        VennDiagram::venn.diagram(
+          x = de_genes_by_method,
+          imagetype = "png",
+          filename = venn_file,
+          output = TRUE,
+          height = 1800,
+          width = 2200,
+          resolution = 300,
+          compression = "lzw",
+          lwd = 1,
+          cex = 0.8,
+          cat.cex = 0.7,
+          margin = 0.08
+        )
+      )
+    )
+    display_saved_figure(
+      venn_file,
+      "Venn diagram of significant differentially expressed gene overlap across methods. Shared regions represent genes detected by multiple methods and support prioritization of DE signals that recur across methods."
+    )
+  } else {
+    message("Skipping Venn diagram: VennDiagram is unavailable or more than five methods have DE genes.")
+  }
+
+  if (requireNamespace("ComplexHeatmap", quietly = TRUE)) {
+    upset_plot <- ComplexHeatmap::UpSet(ComplexHeatmap::make_comb_mat(de_genes_by_method))
+    upset_pdf <- fs::path(out_figures_de, "DE_genes_model_upset.pdf")
+    upset_png <- fs::path(out_figures_de, "DE_genes_model_upset.png")
+
+    grDevices::pdf(upset_pdf, width = 9, height = 6)
+    ComplexHeatmap::draw(upset_plot)
+    invisible(grDevices::dev.off())
+
+    grDevices::png(upset_png, width = 9, height = 6, units = "in", res = 300, bg = "white")
+    ComplexHeatmap::draw(upset_plot)
+    invisible(grDevices::dev.off())
+
+    display_saved_figure(
+      upset_png,
+      "UpSet plot of significant differentially expressed gene intersections across methods. The matrix view is used when overlap structure is too complex for a compact Venn diagram."
+    )
+  } else {
+    message("Skipping UpSet plot: ComplexHeatmap is not available.")
+  }
+} else {
+  message("Skipping Venn/UpSet outputs: fewer than two methods have significant DE genes.")
+}
+```
+
+## Selected method and selected contrast deep dive
+
+::: {.callout-important}
+## Required user decision
+Use `selected_de_method` and, optionally, `selected_contrasts` and `selected_segment_regex` to choose the detailed gene-level inspection shown below. The default selected method is `limma_trend_GeoDiff`, but the comparison evidence above should be reviewed before treating this as the final analysis route.
+:::
+
+```{r}
+#| label: selected-method-contrast-inventory
+#| results: asis
+#| warning: false
+
+selected_de_method <- trimws(as.character(params$selected_de_method))
+requested_selected_contrasts <- as_character_vector(params$selected_contrasts)
+selected_method_available <- selected_de_method %in% names(method_results)
+selected_results <- if (selected_method_available) method_results[[selected_de_method]] else list()
+available_selected_contrasts <- names(selected_results)
+
+if (is.null(available_selected_contrasts)) {
+  available_selected_contrasts <- character()
+}
+
+if (length(requested_selected_contrasts) > 0) {
+  missing_requested_contrasts <- setdiff(requested_selected_contrasts, available_selected_contrasts)
+  selected_contrasts <- intersect(requested_selected_contrasts, available_selected_contrasts)
+} else {
+  missing_requested_contrasts <- character()
+  selected_contrasts <- available_selected_contrasts
+}
+
+selected_deep_dive_ready <- selected_method_available && length(selected_contrasts) > 0
+
+selected_method_status <- tibble::tibble(
+  selected_de_method = selected_de_method,
+  method_available = selected_method_available,
+  requested_contrasts = ifelse(length(requested_selected_contrasts) > 0, paste(requested_selected_contrasts, collapse = "; "), "<all contrasts in selected method>"),
+  contrasts_available_in_method = length(available_selected_contrasts),
+  contrasts_used = length(selected_contrasts),
+  missing_requested_contrasts = ifelse(length(missing_requested_contrasts) > 0, paste(missing_requested_contrasts, collapse = "; "), "<none>"),
+  status = dplyr::case_when(
+    !selected_method_available & is_geodiff_method(selected_de_method) ~ "skipped_missing_geodiff_or_dream_method",
+    !selected_method_available ~ "skipped_missing_selected_method",
+    length(selected_contrasts) == 0 ~ "skipped_no_selected_contrasts",
+    TRUE ~ "ready"
+  ),
+  action = dplyr::case_when(
+    selected_method_available & length(selected_contrasts) > 0 ~ "Proceed with selected-method figures.",
+    is_geodiff_method(selected_de_method) ~ "Selected method was not loaded. If GeoDiff or dream was intentionally skipped or failed in an earlier stage, select an available non-GeoDiff method such as limma_trend_Q3 or limma_voom_TMM.",
+    TRUE ~ "Select one of the available methods listed in the method inventory."
+  )
+)
+
+readr::write_csv(selected_method_status, fs::path(out_tables, "selected_method_status.csv"))
+
+protocol_datatable(
+  selected_method_status,
+  caption = "Selected-method configuration and availability",
+  page_length = 1,
+  scroll_y = "220px"
+)
+
+expanded_contrast_path <- path_proj(params$dir_outputs, params$de_calc_stage, params$de_calc_tables, "contrast_table_expanded.tsv")
+expanded_contrast_table <- if (file.exists(expanded_contrast_path)) {
+  readr::read_tsv(expanded_contrast_path, show_col_types = FALSE) %>%
+    dplyr::mutate(
+      group_1 = as.character(.data$group_1),
+      group_2 = as.character(.data$group_2),
+      contrast_expr = as.character(.data$contrast_expr),
+      contrast_name_group_style = paste0(.data$group_1, "_vs_", .data$group_2)
+    )
+} else {
+  tibble::tibble(
+    group_1 = character(),
+    group_2 = character(),
+    contrast_expr = character(),
+    contrast_name_group_style = character()
+  )
+}
+
+contrast_expr_lookup <- expanded_contrast_table %>%
+  dplyr::select(
+    contrast = contrast_expr,
+    contrast_table_group_1 = group_1,
+    contrast_table_group_2 = group_2,
+    contrast_table_expr = contrast_expr
+  ) %>%
+  dplyr::mutate(contrast_table_match_status = "exact_contrast_expression")
+
+contrast_group_lookup <- expanded_contrast_table %>%
+  dplyr::select(
+    contrast = contrast_name_group_style,
+    contrast_table_group_1 = group_1,
+    contrast_table_group_2 = group_2,
+    contrast_table_expr = contrast_expr
+  ) %>%
+  dplyr::mutate(contrast_table_match_status = "group_1_vs_group_2_name")
+
+contrast_table_lookup <- dplyr::bind_rows(contrast_expr_lookup, contrast_group_lookup) %>%
+  dplyr::filter(!is.na(.data$contrast), nzchar(.data$contrast)) %>%
+  dplyr::distinct(contrast, .keep_all = TRUE)
+
+selected_contrast_inventory <- tibble::tibble(
+  method_name = selected_de_method,
+  contrast = selected_contrasts,
+  n_genes = purrr::map_int(selected_results[selected_contrasts], nrow)
+) %>%
+  dplyr::left_join(
+    method_inventory %>%
+      dplyr::mutate(found_in_stage5_inventory = TRUE) %>%
+      dplyr::select(
+        method_name,
+        contrast,
+        n_genes_tested_stage5 = n_genes,
+        n_significant,
+        n_up,
+        n_down,
+        found_in_stage5_inventory
+      ),
+    by = c("method_name", "contrast")
+  ) %>%
+  dplyr::left_join(contrast_table_lookup, by = "contrast") %>%
+  dplyr::mutate(
+    contrast_panel = sprintf("Contrast %02d", dplyr::row_number()),
+    contrast_readable_label = dplyr::case_when(
+      !is.na(.data$contrast_table_group_1) &
+        nzchar(.data$contrast_table_group_1) &
+        !is.na(.data$contrast_table_group_2) &
+        nzchar(.data$contrast_table_group_2) ~ stringr::str_squish(paste(.data$contrast_table_group_1, "vs", .data$contrast_table_group_2)),
+      TRUE ~ as.character(.data$contrast)
+    ),
+    contrast_heatmap_label = stringr::str_squish(paste(.data$contrast_panel, .data$contrast_readable_label, sep = ": ")),
+    found_in_stage5_inventory = dplyr::coalesce(.data$found_in_stage5_inventory, FALSE),
+    contrast_table_match_status = dplyr::case_when(
+      !file.exists(expanded_contrast_path) ~ "contrast_table_expanded.tsv not found",
+      is.na(.data$contrast_table_match_status) ~ "not_matched_to_expanded_contrast_table",
+      TRUE ~ .data$contrast_table_match_status
+    )
+  ) %>%
+  dplyr::relocate(contrast_panel, .after = method_name)
+
+selected_contrast_label_lookup <- stats::setNames(selected_contrast_inventory$contrast_panel, selected_contrast_inventory$contrast)
+selected_contrast_display_label <- function(contrast_name) {
+  label <- unname(selected_contrast_label_lookup[contrast_name])
+  if (length(label) == 0 || is.na(label) || !nzchar(label)) {
+    return("Contrast panel")
+  }
+  label
+}
+
+selected_contrast_heatmap_label_lookup <- stats::setNames(selected_contrast_inventory$contrast_heatmap_label, selected_contrast_inventory$contrast)
+selected_contrast_heatmap_label <- function(contrast_name) {
+  label <- unname(selected_contrast_heatmap_label_lookup[contrast_name])
+  if (length(label) == 0 || is.na(label) || !nzchar(label)) {
+    return(stringr::str_squish(paste(selected_contrast_display_label(contrast_name), contrast_name, sep = ": ")))
+  }
+  label
+}
+
+selected_contrast_heatmap_title <- function(contrast_name, width = 72) {
+  stringr::str_wrap(selected_contrast_heatmap_label(contrast_name), width = width)
+}
+
+readr::write_csv(selected_contrast_inventory, fs::path(out_tables, "selected_method_contrast_inventory.csv"))
+
+protocol_datatable(
+  selected_contrast_inventory,
+  caption = "Contrasts used for selected-method deep inspection",
+  page_length = 15,
+  scroll_y = "420px"
+)
+```
+
+## Selected expression metadata checkpoint
+
+::: {.callout-note}
+## What to check
+Confirm that the expression object matches the selected method and that the metadata columns used for grouping, color, faceting, and segment filtering are present before interpreting selected-method boxplots.
+:::
+
+```{r}
+#| label: selected-expression-metadata
+#| results: asis
+#| warning: false
+
+selected_expression_object_name <- if (selected_method_available) method_expression_object_name(selected_de_method) else NA_character_
+selected_expression_object <- if (!is.na(selected_expression_object_name)) expression_objects[[selected_expression_object_name]] else NULL
+selected_expression_ready <- selected_deep_dive_ready && !is.null(selected_expression_object)
+
+selected_expr_mat <- matrix(nrow = 0, ncol = 0)
+selected_pheno_df <- tibble::tibble(sample_id = character())
+
+if (selected_expression_ready) {
+  selected_expr_mat <- get_expr_mat(selected_expression_object)
+  selected_pheno_df <- get_pheno(selected_expression_object)
+  selected_pheno_df$sample_id <- rownames(selected_pheno_df)
+
+  selected_pheno_df <- ensure_metadata_column(selected_pheno_df, boxplot_x_col, c(col_disease, col_cell_type, col_segment), "UnknownGroup", "boxplot x-axis group")
+  selected_pheno_df <- ensure_metadata_column(selected_pheno_df, boxplot_color_col, c(col_segment, col_disease, col_cell_type), "UnknownGroup", "boxplot color group")
+  if (nzchar(boxplot_facet_col)) {
+    selected_pheno_df <- ensure_metadata_column(selected_pheno_df, boxplot_facet_col, c(col_cell_type, col_segment), "UnknownGroup", "optional boxplot facet")
+  }
+
+  shared_samples <- intersect(colnames(selected_expr_mat), selected_pheno_df$sample_id)
+  if (length(shared_samples) < 2) {
+    selected_expression_ready <- FALSE
+    selected_expression_reason <- "Fewer than two samples overlap between the selected expression matrix and metadata."
+  } else {
+    selected_expr_mat <- selected_expr_mat[, shared_samples, drop = FALSE]
+    selected_pheno_df <- selected_pheno_df %>%
+      dplyr::filter(.data$sample_id %in% shared_samples)
+    selected_expression_reason <- "Ready."
+  }
+} else {
+  selected_expression_reason <- if (selected_deep_dive_ready) {
+    glue::glue("Expression object '{selected_expression_object_name}' is unavailable.")
+  } else {
+    "Selected method or selected contrasts are not available."
+  }
+}
+
+selected_expression_summary <- tibble::tibble(
+  selected_method = selected_de_method,
+  expression_object = ifelse(is.na(selected_expression_object_name), "<not resolved>", selected_expression_object_name),
+  status = ifelse(selected_expression_ready, "ready", "skipped"),
+  reason = selected_expression_reason,
+  boxplot_x_column = boxplot_x_col,
+  boxplot_color_column = boxplot_color_col,
+  boxplot_facet_column = ifelse(nzchar(boxplot_facet_col), boxplot_facet_col, "<none>"),
+  genes = nrow(selected_expr_mat),
+  samples = ncol(selected_expr_mat)
+)
+
+readr::write_csv(selected_expression_summary, fs::path(out_tables, "selected_expression_object_summary.csv"))
+
+protocol_datatable(
+  selected_expression_summary,
+  caption = "Expression object used for selected-method gene-level figures",
+  page_length = 1
+)
+
+segment_label_audit <- if (selected_expression_ready && col_segment %in% names(selected_pheno_df)) {
+  selected_pheno_df %>%
+    dplyr::mutate(
+      segment_label = as.character(.data[[col_segment]]),
+      missing_or_blank_segment = is.na(.data$segment_label) | !nzchar(trimws(.data$segment_label))
+    ) %>%
+    dplyr::summarise(
+      selected_method = selected_de_method,
+      segment_column = col_segment,
+      samples_checked = dplyr::n(),
+      samples_with_missing_or_blank_segment = sum(.data$missing_or_blank_segment),
+      segment_levels = paste(sort(unique(stats::na.omit(.data$segment_label))), collapse = "; "),
+      status = ifelse(samples_with_missing_or_blank_segment > 0, "review_required", "passed"),
+      .groups = "drop"
+    )
+} else {
+  tibble::tibble(
+    selected_method = selected_de_method,
+    segment_column = col_segment,
+    samples_checked = 0L,
+    samples_with_missing_or_blank_segment = NA_integer_,
+    segment_levels = "",
+    status = "skipped",
+    reason = "Selected expression metadata was unavailable."
+  )
+}
+
+readr::write_csv(segment_label_audit, fs::path(out_tables, "segment_label_audit.csv"))
+
+protocol_datatable(
+  segment_label_audit,
+  caption = "Selected-method segment label check",
+  page_length = 5
+)
+```
+
+## Focused selected-contrast heatmaps
+
+::: {.callout-note}
+## What this section shows
+These heatmaps focus on the selected method and selected contrast set. They use the configured adjusted P-value threshold (`selected_heatmap_adj_p_cutoff`) and selected-contrast gene limit (`heatmap_max_genes`) so the output remains compact enough for interpretation.
+:::
+
+```{r}
+#| label: selected-focused-heatmaps
+#| results: asis
+#| warning: false
+#| message: false
+
+selected_heatmap_audit <- list()
+
+if (!selected_expression_ready) {
+  selected_heatmap_audit[[1]] <- tibble::tibble(
+    method_name = selected_de_method,
+    plot_family = "Selected-contrast heatmap",
+    expression_object = selected_expression_object_name,
+    status = "skipped",
+    reason = selected_expression_reason,
+    genes_plotted = NA_integer_,
+    samples_plotted = NA_integer_,
+    output_file = NA_character_,
+    contrast = NA_character_,
+    segment_filter = ifelse(nzchar(params$selected_segment_regex), params$selected_segment_regex, "<all segments / infer from contrast>"),
+    adj_p_cutoff = params$selected_heatmap_adj_p_cutoff,
+    heatmap_gene_limit = params$heatmap_max_genes,
+    heatmap_limit_parameter = "heatmap_max_genes"
+  )
+  emit_markdown(glue::glue("::: {{.callout-note}}\nSelected heatmaps were skipped. {selected_expression_reason}\n:::\n"))
+} else {
+  emit_markdown("\n\n### Selected heatmap contrast panels {.panel-tabset}\n\n")
+
+  for (contrast_name in selected_contrasts) {
+    heatmap_contrast_label <- selected_contrast_heatmap_label(contrast_name)
+    emit_markdown(glue::glue("\n\n#### {heatmap_contrast_label}\n\n"))
+
+    heatmap_result <- safe_plot_call(
+      make_selected_contrast_heatmap(contrast_name, selected_results[[contrast_name]], selected_expression_object),
+      glue::glue("Selected heatmap for {selected_de_method}/{contrast_name}")
+    )
+
+    display_visual_result(
+      heatmap_result,
+      "Focused selected-contrast heatmap",
+      glue::glue("Focused row-scaled heatmap for {selected_de_method}, {heatmap_contrast_label}. The plotted genes pass the selected adjusted P-value cutoff and are limited by `heatmap_max_genes` ({params$heatmap_max_genes}). Sample annotations support review of whether the focused comparison is biologically coherent.")
+    )
+
+    selected_heatmap_audit[[contrast_name]] <- visual_result_to_audit(
+      heatmap_result,
+      selected_de_method,
+      "Selected-contrast heatmap",
+      selected_expression_object_name
+    ) %>%
+      dplyr::mutate(
+        contrast = contrast_name,
+        segment_filter = ifelse(nzchar(params$selected_segment_regex), params$selected_segment_regex, "<all segments / infer from contrast>"),
+        adj_p_cutoff = params$selected_heatmap_adj_p_cutoff,
+        heatmap_gene_limit = params$heatmap_max_genes,
+        heatmap_limit_parameter = "heatmap_max_genes",
+        contrast_heatmap_label = heatmap_contrast_label
+      )
+  }
+}
+
+selected_heatmap_audit_df <- dplyr::bind_rows(selected_heatmap_audit)
+readr::write_csv(selected_heatmap_audit_df, fs::path(out_tables, "selected_contrast_heatmap_audit.csv"))
+
+protocol_datatable(
+  selected_heatmap_audit_df,
+  caption = "Selected-contrast heatmap configuration and render status",
+  page_length = 10,
+  scroll_y = "320px"
+)
+```
+
+## Top DE genes by selected contrast
+
+::: {.callout-note}
+## What this section shows
+For each selected contrast, the top `top_n_genes` significant genes (ranked by adjusted P-value, then absolute log fold-change) are drawn as per-gene boxplots so you can see where the contrast's strongest genes are expressed.
+
+Each contrast shows an **All matched samples** panel — every sample assigned to the contrast's numerator and denominator arms, pooled across *all* segments. This is the contrast-level view of the top genes: it shows their expression across the cell-type groups the comparison is built from, using the whole matched sample set rather than any single segment.
+
+When a distinct segment column is available, the panel also gains **one tab per segment** — the same top genes restricted to each tissue segment (for example the PanCK epithelial and PanCK-negative / stromal compartments), so you can check whether the contrast's signal is segment-specific. This per-segment strip is controlled by `boxplot_segment_tabs`: under the default `"auto"` it is shown only when the segment column is genuinely distinct from the contrast/grouping axis, and is suppressed automatically when segment is already built into your contrasts or there is no separate segment column (set `"always"` to force it on, `"never"` to force it off).
+
+The x-axis is the `boxplot_x_col` metadata column (`cell_type` by default) — the cell-type groups the contrasts compare — and points are coloured by `boxplot_color_col` (`disease_status` by default), so the recovered Tumour/Healthy split is visible within each cell type. Stage 5 contrast metadata restricts the plotted samples to the numerator and denominator arms; it does not set the visual grouping. A panel is still rendered when only one x-axis group is present after filtering, in which case the boxes summarise the top genes within that single group. For one-vs-rest contrasts, the denominator arm aggregates the denominator terms recorded in `contrast_table_expanded.tsv`.
+:::
+
+```{r}
+#| label: selected-top-gene-boxplots
+#| results: asis
+#| warning: false
+
+plot_summaries <- list()
+missing_gene_summaries <- list()
+
+if (!selected_expression_ready) {
+  plot_summaries[[1]] <- make_plot_summary(
+    source_label = "top_genes",
+    plot_family = "top_genes",
+    contrast_name = "",
+    scope = "segment_filtered",
+    file_stub = "top_genes_skipped",
+    requested_genes = 0L,
+    status = "skipped",
+    reason = selected_expression_reason
+  )
+  emit_markdown(glue::glue("::: {{.callout-note}}\nTop-gene boxplots were skipped. {selected_expression_reason}\n:::\n"))
+} else {
+  emit_markdown("\n\n### Top DE contrast panels {.panel-tabset}\n\n")
+
+  for (contrast_name in selected_contrasts) {
+    top_gene_contrast_label <- selected_contrast_heatmap_label(contrast_name)
+    emit_markdown(glue::glue("\n\n#### {top_gene_contrast_label}\n\n"))
+
+    clean_tbl <- standardise_de_table(selected_results[[contrast_name]])
+    if (is.null(clean_tbl) || nrow(clean_tbl) == 0) {
+      plot_summaries[[length(plot_summaries) + 1]] <- make_plot_summary(
+        source_label = glue::glue("top_genes:{contrast_name}"),
+        plot_family = "top_genes",
+        contrast_name = contrast_name,
+        scope = "segment_filtered",
+        file_stub = sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_skipped")),
+        requested_genes = 0L,
+        contrast_label = top_gene_contrast_label,
+        status = "skipped_empty_result_table",
+        reason = "Selected contrast table was empty or invalid."
+      )
+      next
+    }
+
+    top_genes <- clean_tbl %>%
+      dplyr::filter(
+        is.finite(.data$adj.P.Val),
+        is.finite(.data$logFC),
+        .data$adj.P.Val < params$adj_p_cutoff,
+        abs(.data$logFC) > params$logFC_cutoff
+      ) %>%
+      dplyr::arrange(.data$adj.P.Val, dplyr::desc(abs(.data$logFC))) %>%
+      dplyr::slice_head(n = params$top_n_genes) %>%
+      dplyr::pull(.data$gene)
+
+    if (length(top_genes) == 0) {
+      plot_summaries[[length(plot_summaries) + 1]] <- make_plot_summary(
+        source_label = glue::glue("top_genes:{contrast_name}"),
+        plot_family = "top_genes",
+        contrast_name = contrast_name,
+        scope = "segment_filtered",
+        file_stub = sanitize_file_name(glue::glue("top_genes_{selected_de_method}_{contrast_name}_skipped")),
+        requested_genes = 0L,
+        contrast_label = top_gene_contrast_label,
+        status = "skipped_no_significant_genes",
+        reason = "No genes passed the selected adjusted P-value and logFC thresholds for this contrast."
+      )
+      next
+    }
+
+    result <- plot_top_gene_segment_panels(genes = top_genes, contrast_name = contrast_name)
+
+    plot_summaries <- c(plot_summaries, result$summaries)
+    missing_gene_summaries <- c(missing_gene_summaries, result$missing)
+  }
+}
+```
+
+## Plot checklist tables
+
+These checklist tables record what selected-method figures were attempted, what was plotted, and why any requested panel was skipped.
+
+```{r}
+#| label: selected-plot-audit-tables
+#| results: asis
+#| warning: false
+
+plot_summary_df <- dplyr::bind_rows(plot_summaries)
+missing_genes_df <- dplyr::bind_rows(missing_gene_summaries)
+
+if (nrow(plot_summary_df) == 0) {
+  plot_summary_df <- tibble::tibble(
+    source = character(),
+    plot_family = character(),
+    contrast = character(),
+    scope = character(),
+    figure = character(),
+    requested_genes = integer(),
+    plotted_genes = integer(),
+    missing_genes = integer(),
+    segment_filter = character(),
+    segment_label = character(),
+    contrast_label = character(),
+    disease_status_levels = character(),
+    boxplot_x_column = character(),
+    boxplot_color_column = character(),
+    boxplot_facet_column = character(),
+    samples_plotted = integer(),
+    output_pdf = character(),
+    output_png = character(),
+    status = character(),
+    reason = character()
+  )
+}
+
+if (nrow(missing_genes_df) == 0) {
+  missing_genes_df <- tibble::tibble(
+    source = character(),
+    plot_family = character(),
+    contrast = character(),
+    scope = character(),
+    figure = character(),
+    gene = character(),
+    reason = character()
+  )
+}
+
+readr::write_csv(plot_summary_df, fs::path(out_tables, "gene_boxplot_summary.csv"))
+readr::write_csv(missing_genes_df, fs::path(out_tables, "missing_requested_genes.csv"))
+
+protocol_datatable(
+  plot_summary_df,
+  caption = "Selected-method gene-level plot checklist summary",
+  page_length = 15,
+  scroll_y = "420px"
+)
+
+protocol_datatable(
+  missing_genes_df,
+  caption = "Requested genes not plotted and reason",
+  page_length = 15,
+  scroll_y = "300px"
+)
+```
+
+::: {.callout-important}
+## Decision checkpoint before pathway enrichment
+Use the method inventories, volcano plots, heatmaps, overlap summaries, and selected-method gene-level plots above to choose the method and contrasts to carry into `7_functional_enrichment.qmd`. Record the selected method, selected contrasts, segment filter, and any caveats in your run notes before continuing.
+:::
+
+## Output list
+
+```{r}
+#| label: output-list
+
+output_list_files <- c(
+  list.files(out_results_de, recursive = TRUE, full.names = TRUE),
+  list.files(out_tables, recursive = TRUE, full.names = TRUE),
+  list.files(out_figures_de, recursive = TRUE, full.names = TRUE)
+)
+
+phase6_output_list <- tibble::tibble(path = unique(output_list_files)) %>%
+  dplyr::filter(file.exists(.data$path)) %>%
+  dplyr::mutate(relative_path = fs::path_rel(.data$path, start = project_root)) %>%
+  dplyr::arrange(.data$relative_path)
+
+readr::write_csv(phase6_output_list, fs::path(out_tables, "phase6_output_list.csv"))
+
+protocol_datatable(
+  phase6_output_list,
+  caption = "Stage 6 output list",
+  page_length = 15,
+  scroll_y = "420px"
+)
+```
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r}
+sessionInfo()
+```
+:::

@@ -1,0 +1,2563 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "Quality Control (QC)"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+    include-in-header:
+      text: |
+        <style>
+        :root {
+          --bs-body-font-family: "Segoe UI", Arial, sans-serif;
+          --bs-font-sans-serif: "Segoe UI", Arial, sans-serif;
+          --bs-code-font-family: "Segoe UI", Arial, sans-serif;
+        }
+        body,
+        body *:not(svg):not(svg *) {
+          font-family: "Segoe UI", Arial, sans-serif !important;
+        }
+        </style>
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+
+params:
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+
+  # Standard project folders
+  dir_data: "Data"
+  dir_outputs: "Outputs"
+  dir_src: "src"
+
+  # Inputs
+  dir_dcc: "DCC_Files"
+  dir_pkc: "PKC_Files"
+  dir_rawdata: "rawdata"
+
+  # Output from 0_Clean_Up_Merge_LWS_Metadata.qmd
+  dir_clean_merge_output: "0_Clean_And_Merge"
+  merged_lws_metadata_file: "Complete_LWS_Metadata.xlsx"
+  sample_id_column: "library_name" # Metadata ID column name supplied by the user. The notebook renames this to internal `sample_id` for later stages.
+
+  # Optional final QC audit after gene LOQ filtering.
+  # Set this to the main group column you intend to compare later, for example
+  # "disease_status", "condition", or "treatment_group". Leave blank to skip.
+  key_annotation_column: "disease_status"
+  key_annotation_min_segments_per_group: 3
+
+  # Optional explicit file picks; leave blank for auto-detect
+  pkc_zip_name: "GSE226829_Hs_R_NGS_WTA_v1.0.pkc.gz"
+  pkc_file_name: ""
+
+  # DCC zip input (single filename option):
+  # - Leave blank to auto-detect when exactly ONE .zip exists in Data/DCC_Files.
+  # - If multiple .zip files exist and you want ONE of them, set this field
+  #   (e.g., "run_12_dcc.zip").
+  # - Do not use this field when selecting multiple zips.
+  dcc_zip_name: "GSE226829_RAW.zip"
+
+  # DCC zip input (multiple filename option):
+  # - Use this list when you want to include multiple DCC zip archives in one run.
+  # - Example: value: ["run_12_dcc.zip", "run_13_dcc.zip"]
+  # - Keep empty unless you need multi-zip selection.
+  dcc_zip_names:
+    value: []
+
+  # Output stage folder under Outputs
+  out_stage: "1_QC"
+
+  # Output subfolders under Outputs/<out_stage>
+  out_results: "results"
+  out_tables: "tables"
+  out_figures: "figures"
+
+  # Quarto parameter objects must be wrapped in `value:`.
+  qc:
+    value:
+      minSegmentReads: 1000
+      percentTrimmed: 80
+      percentStitched: 80
+      percentAligned: 75      # Matches the original GSE226829 published analysis (was 80).
+      # percentSaturation = 0 matches the original GSE226829 published analysis (no
+      # saturation gate). Normal-pancreas Healthy segments (esp. Duct/PanIN) have high reads
+      # but only ~40-46% sequencing saturation, so the NanoString-default 50 removed almost
+      # all of them (Duct/PanIN_Healthy collapsed to n=1) and unbalanced the Tumor-vs-Healthy
+      # comparisons. 0 retains all 277 segments at segment QC, fully recovering every Healthy
+      # group. Raise (e.g. 40-50) to reinstate saturation filtering.
+      percentSaturation: 0
+      minNegativeCount: 1
+      maxNTCCount: 9000
+      minNuclei: 20
+      nuclei_column: ""
+      minArea: 1000           # Matches the original GSE226829 published analysis (was 500; no segments fall in 500-1000 here, so a no-op for this dataset).
+
+      # Visual reference line only (the applied saturation filter is percentSaturation=0);
+      # kept at 50 so the histogram shows Healthy segments clustering below the conventional bar.
+      cutline_saturation: 50
+      cutline_trimmed: 80
+      cutline_stitched: 50
+      cutline_aligned: 40
+      cutline_area: 1000
+
+      minProbeRatio: 0.1
+      percentFailGrubbs: 20
+      removeLocalOutliers: true
+
+      loq_cutoff_sd: 2
+      loq_min: 2
+
+      min_gene_detection_rate_per_segment: 0.10
+      min_gene_detection_rate_across_segments: 0.10
+
+  # Nested save options also require `value:` in Quarto params.
+  save:
+    value:
+      save_plots: true
+      save_rds: true
+---
+
+# Quality Control (1)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook is written for users applying the workflow to their own dataset. Read each section in order, confirm required inputs before running code sections, and use the YAML parameters at the top of the file to adapt paths and thresholds for your study design.
+:::
+
+::: {.callout-warning collapse="true"}
+## Before you run
+Validate input data and metadata column names first. Most runtime issues in protocol use are caused by path mismatches, missing files, or dataset-specific column naming differences.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+::: {.callout-caution collapse="true"}
+## Reproducibility caution
+When editing parameters, record exactly what changed (paths, thresholds, model options) in your run notes so later figures and conclusions can be reproduced during review and publication.
+:::
+
+This notebook runs the **parameterised Quality Control (QC) stage** for GeoMx spatial transcriptomics data.
+
+It is designed to be reusable across projects by reading thresholds, file paths, and save options from YAML parameters.
+
+## What this step does
+
+1. Resolves input files (Digital Count Conversion (DCC), Probe Kit Configuration (PKC), and merged metadata) from configured folders.
+2. Builds a `NanoStringGeoMxSet` object.
+3. Applies segment-level QC and probe-level QC.
+4. Performs limit of quantification (LOQ)-based detection filtering at segment and gene level.
+5. Writes intermediate plots/tables and QC-filtered objects to `Outputs/1_QC`.
+
+## Why this matters
+
+All later modelling depends on QC-filtered inputs and clearly documented sample/probe exclusion logic. This stage makes quality thresholds explicit and reproducible.
+
+## What you decide next
+
+- If QC metrics and exclusion counts are acceptable for your design, proceed to `2_GeoDiff_Processing.qmd`.
+- If exclusions are unexpectedly high or concentrated in key groups, revise thresholds or investigate input issues before proceeding.
+
+This document focuses on **what is being run and why**. It does **not** interpret biological or QC outcomes.
+
+# Load libraries
+
+Load all package dependencies required for file handling, GeoMx processing, plotting, and QC checks.
+
+```{r load-libraries}
+#| output: false
+#| message: false
+#| warning: false
+
+library(janitor)
+library(NanoStringNCTools)
+library(GeomxTools)
+library(GeoMxWorkflows)
+library(testthat)
+library(tidyverse)
+library(ggforce)
+library(readxl)
+library(writexl)
+library(cowplot)
+library(formattable)
+library(PCAtools)
+library(smplot2)
+# Filesystem helper package used for portable cross-platform paths.
+library(fs)
+library(here)
+library(glue)
+
+protocol_font_family <- "Segoe UI"
+if (.Platform$OS.type == "windows") {
+  try(
+    do.call(
+      grDevices::windowsFonts,
+      stats::setNames(
+        list(grDevices::windowsFont(protocol_font_family)),
+        protocol_font_family
+      )
+    ),
+    silent = TRUE
+  )
+}
+
+```
+
+# Setup paths and source utilities
+
+Resolve project directories from YAML params, create expected output folders, and source shared helper scripts.
+
+```{r}
+#| label: setup-paths
+#| message: false
+#| warning: false
+
+library(fs)
+
+# Allow interactive execution by rebuilding `params` from YAML when not rendering.
+# Rebuild params in interactive mode so code sections can run outside a full Quarto render.
+if (!exists("params")) {
+  # get current .qmd path from RStudio
+  # Interactive fallback needs RStudio context to locate this .qmd file.
+  if (!requireNamespace("rstudioapi", quietly = TRUE) || !rstudioapi::isAvailable()) {
+    stop("No `params` found. Render the document, or run inside RStudio so I can read YAML params.")
+  }
+  qmd_path <- rstudioapi::getActiveDocumentContext()$path
+  if (!nzchar(qmd_path)) stop("Could not detect active .qmd path in RStudio.")
+
+  fm <- rmarkdown::yaml_front_matter(qmd_path)
+
+  # Extract params and unwrap param objects that use `value:`
+  unwrap <- function(x) if (is.list(x) && "value" %in% names(x)) x$value else x
+  params <- lapply(fm$params, unwrap)
+}
+
+
+
+# Auto-detect the project root if project_root is blank.
+root <- params$project_root
+# Default to working-directory-derived root when YAML value is unset/placeholder.
+if (is.null(root) || root == "" || root == ".") {
+  root <- here::here()
+} else {
+  root <- fs::path_abs(root)
+}
+
+# here()-first helper with explicit YAML-root override when provided.
+root_via_here <- fs::path_abs(here::here())
+use_here_root <- identical(fs::path_abs(root), root_via_here)
+project_path <- function(...) {
+  if (use_here_root) {
+    here::here(...)
+  } else {
+    fs::path(root, ...)
+  }
+}
+
+# Top-level dirs
+dir_data    <- project_path(params$dir_data)
+dir_outputs <- project_path(params$dir_outputs)
+dir_src     <- project_path(params$dir_src)
+path_utilities_path <- fs::path(dir_src, "pathUtilities.R")
+if (!fs::file_exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+
+# Input dirs
+dir_dcc            <- project_path(params$dir_data, params$dir_dcc)
+dir_clean_merge_output <- project_path(params$dir_outputs, params$dir_clean_merge_output)
+dir_pkc            <- project_path(params$dir_data, params$dir_pkc)
+dir_rawdata         <- project_path(params$dir_data, params$dir_rawdata)
+
+# Output dirs for this stage (1_QC)
+out_base   <- project_path(params$dir_outputs, params$out_stage)
+out_results <- fs::path(out_base, params$out_results)
+out_tables  <- fs::path(out_base, params$out_tables)
+out_figures <- fs::path(out_base, params$out_figures)
+stage1_merged_contract <- protocol_contract_path(
+  dir_clean_merge_output,
+  params$merged_lws_metadata_file,
+  portable_path_limit,
+  "Stage 0 merged workbook input"
+)
+stage1_qc_pass_contract <- protocol_contract_path(
+  out_results,
+  "QC_pass_spatial_data.RDS",
+  portable_path_limit,
+  "Stage 1 QC-pass object"
+)
+stage1_filtered_contract <- protocol_contract_path(
+  out_results,
+  "filtered_spatial_data.RDS",
+  portable_path_limit,
+  "Stage 1 filtered object"
+)
+stage1_path_audit <- protocol_path_audit(
+  c(
+    "Merged metadata input" = stage1_merged_contract,
+    "QC-pass object" = stage1_qc_pass_contract,
+    "Filtered object" = stage1_filtered_contract,
+    "QC figure directory" = out_figures
+  ),
+  portable_path_limit
+)
+protocol_assert_audit(stage1_path_audit, portable_path_limit)
+knitr::kable(stage1_path_audit, caption = "Stage 1 path-portability audit")
+
+# Create folders if missing
+fs::dir_create(dir_rawdata, recurse = TRUE)
+fs::dir_create(out_results, recurse = TRUE)
+fs::dir_create(out_tables, recurse = TRUE)
+fs::dir_create(out_figures, recurse = TRUE)
+
+# Source helper scripts from the project-level src directory.
+required_helper_files <- c("utilityFunctions.R")
+missing_helper_files <- required_helper_files[
+  !fs::file_exists(fs::path(dir_src, required_helper_files))
+]
+if (length(missing_helper_files) > 0) {
+  stop(
+    "Required helper file(s) not found in the configured source directory: ",
+    paste(missing_helper_files, collapse = ", "),
+    ". Resolved source directory: ", dir_src,
+    ". Set params$project_root to the project root and params$dir_src to the helper directory name, usually 'src'.",
+    call. = FALSE
+  )
+}
+source(fs::path(dir_src, "utilityFunctions.R"))
+
+# Render kable output as plain as-is markdown/html so Quarto does not re-process
+# deprecated xfun-backed attributes from knitr table objects.
+render_protocol_table <- function(x, ..., caption = NULL) {
+  table_output <- suppressWarnings(knitr::kable(x, ..., caption = caption))
+  knitr::asis_output(paste(unclass(table_output), collapse = "\n"))
+}
+
+message(glue::glue("ROOT: {root}"))
+message(glue::glue("Shared source helpers: {dir_src}"))
+message(glue::glue("DCC inputs: {dir_dcc}"))
+message(glue::glue("RAW DCC staging: {dir_rawdata}"))
+message(glue::glue("PKC input: {dir_pkc}"))
+message(glue::glue("Merged LWS+Metadata: {fs::path(dir_clean_merge_output, params$merged_lws_metadata_file)}"))
+message(glue::glue("QC output base: {out_base}"))
+
+```
+
+## Settings Used in This QC Run
+
+The table below provides a compact summary of the key paths and QC parameters used in this run.
+
+```{r run-configuration-summary}
+#| message: false
+#| warning: false
+
+qc_run_configuration <- tibble::tibble(
+  Setting = c(
+    "Project root",
+    "DCC input directory",
+    "PKC input directory",
+    "Merged LWS+metadata file",
+    "QC output base directory",
+    "Key annotation audit column",
+    "Key annotation review threshold",
+    "QC minimum reads",
+    "QC minimum nuclei",
+    "QC minimum alignment (%)",
+    "QC minimum sequencing saturation (%)"
+  ),
+  Value = c(
+    root,
+    dir_dcc,
+    dir_pkc,
+    fs::path(dir_clean_merge_output, params$merged_lws_metadata_file),
+    out_base,
+    params$key_annotation_column,
+    as.character(params$key_annotation_min_segments_per_group),
+    as.character(params$qc$minSegmentReads),
+    as.character(params$qc$minNuclei),
+    as.character(params$qc$percentAligned),
+    as.character(params$qc$percentSaturation)
+  )
+)
+
+render_protocol_table(
+  qc_run_configuration,
+  caption = "QC settings used for file selection and quality thresholds."
+)
+```
+
+# Find Input Files and Prepare Metadata
+
+::: {.callout-note}
+## DCC input decision for protocol users
+Place DCC files inside a `.zip` archive in `Data/DCC_Files`.  
+Inside that zip, either raw `.dcc` files **or** compressed `.dcc.gz` files are supported.  
+If one zip exists, the notebook auto-selects it.  
+If multiple zips exist, set `dcc_zip_name` to **one** filename in YAML (for example `dcc_zip_name: "run_12_dcc.zip"`).  
+If you want to process multiple zips from that folder in one run, use `dcc_zip_names` (for example `value: ["run_12_dcc.zip", "run_13_dcc.zip"]`).  
+Why this matters: choosing one zip, or an explicit list of zips, helps keep repeated runs consistent and avoids mixing files from different runs by mistake.
+:::
+
+This section finds the PKC and DCC files, prepares DCC files if needed, and loads the merged LWS+metadata table for sample matching.
+
+```{r resolve-input-files}
+#| message: false
+#| output: false
+
+
+# Resolve PKC input in a fixed order: use existing .pkc first, otherwise extract supported archives.
+# Resolve PKC path from explicit file, existing extract, or supported archives.
+resolve_pkc_file <- function(dir_pkc, pkc_file_name = NULL, pkc_zip_name = NULL) {
+  # Choose explicit file when provided to avoid ambiguous auto-detection.
+  # Fast path: explicit .pkc provided.
+  if (!is.null(pkc_file_name) && nzchar(pkc_file_name)) {
+    # Validate explicit PKC path before returning.
+    pkc_path <- fs::path(dir_pkc, pkc_file_name)
+    if (!fs::file_exists(pkc_path)) stop("PKC file not found: ", pkc_path)
+    return(pkc_path)
+  }
+
+  # If already unzipped, prefer using it directly.
+  pkc_files <- fs::dir_ls(dir_pkc, regexp = "(?i)\\.pkc$", type = "file")
+  # Reuse extracted PKC if already present from previous runs.
+  if (length(pkc_files) > 0) {
+    if (length(pkc_files) > 1) message("Multiple .pkc files found, using: ", pkc_files[1])
+    return(pkc_files[1])
+  }
+
+  # Build candidate archive list from param or auto-detect (.zip and .pkc.gz).
+  archives <- if (!is.null(pkc_zip_name) && nzchar(pkc_zip_name)) {
+    fs::path(dir_pkc, pkc_zip_name)
+  } else {
+    fs::dir_ls(dir_pkc, regexp = "(?i)\\.(zip|pkc\\.gz|gz)$", type = "file")
+  }
+
+  # Stop with available correction steps when neither PKC file nor archive is found.
+  if (length(archives) == 0) {
+    stop("No PKC input found in: ", dir_pkc,
+         "\nExpected one of: .pkc, .zip, .pkc.gz")
+  }
+
+  missing <- archives[!fs::file_exists(archives)]
+  if (length(missing) > 0) stop("PKC archive not found: ", paste(missing, collapse = ", "))
+
+  # Extract first archive (warn if multiple were detected).
+  if (length(archives) > 1) message("Multiple PKC archives found, using: ", archives[1])
+  archive <- archives[1]
+
+  if (grepl("\\.zip$", tolower(archive))) {
+    unzip(zipfile = archive, exdir = dir_pkc)
+  } else if (grepl("\\.gz$", tolower(archive))) {
+    out_file <- fs::path(dir_pkc, gsub("\\.gz$", "", basename(archive), ignore.case = TRUE))
+    in_con <- gzfile(archive, "rb")
+    out_con <- file(out_file, "wb")
+    on.exit({ try(close(in_con), silent = TRUE); try(close(out_con), silent = TRUE) }, add = TRUE)
+    # Stream in fixed-size blocks to handle large files efficiently.
+    repeat {
+      bytes <- readBin(in_con, what = raw(), n = 65536)
+      if (length(bytes) == 0) break
+      writeBin(bytes, out_con)
+    }
+  } else {
+    stop("Unsupported PKC archive format: ", archive)
+  }
+
+  pkc_files <- fs::dir_ls(dir_pkc, regexp = "(?i)\\.pkc$", type = "file")
+  if (length(pkc_files) == 0) stop("No .pkc found after PKC extraction in: ", dir_pkc)
+  if (length(pkc_files) > 1) message("Multiple .pkc files found after extraction, using: ", pkc_files[1])
+  pkc_files[1]
+}
+
+pkcFile <- resolve_pkc_file(
+  dir_pkc = dir_pkc,
+  pkc_file_name = params$pkc_file_name,
+  pkc_zip_name = params$pkc_zip_name
+)
+
+
+# Resolve DCC input using the shared helper.
+# DCC files are supplied through zip files selected by `dcc_zip_name` (one)
+# or `dcc_zip_names` (many), with auto-detect when exactly one zip is present.
+dcc_all <- read_dcc_files(
+  dir_dcc = dir_dcc,
+  dir_rawdata = dir_rawdata,
+  dcc_zip_name = params$dcc_zip_name,
+  dcc_zip_names = params$dcc_zip_names,
+  clean_stage = TRUE,
+  path_limit = portable_path_limit
+)
+message("Found DCC files: ", length(dcc_all))
+
+merged_file <- stage1_merged_contract
+# This file is produced by notebook 0; stop here if stage 0 was skipped.
+if (!fs::file_exists(merged_file)) {
+  stop("Merged LWS+Metadata file not found: ", merged_file,
+       "\nRun 0_Clean_Up_Merge_LWS_Metadata.qmd first.")
+}
+
+# Read merged LWS+metadata and standardize column names for later joins.
+combinedMetadata <- readxl::read_xlsx(merged_file) %>%
+  janitor::clean_names(case = "snake")
+
+# Segment names available for plotting and QC grouping
+# Segment column is required for colour mapping and QC grouping plots.
+if (!("segment" %in% names(combinedMetadata))) {
+  stop("Column 'segment' not found in merged metadata. Confirm the stage 0 clean/merge output includes segment labels.")
+}
+
+# Standardize case-only segment label variants
+# so later plots/QC counts do not split the same segment group.
+segment_before <- combinedMetadata$segment %>% as.character() %>% trimws()
+segment_title <- stringr::str_to_title(segment_before)
+
+segment_case_mapping <- tibble::tibble(
+  segment_original = segment_before,
+  segment_standardized = segment_title
+) %>%
+  dplyr::filter(!is.na(segment_original), segment_original != "") %>%
+  dplyr::distinct()
+
+combinedMetadata <- combinedMetadata %>%
+  dplyr::mutate(segment = stringr::str_to_title(trimws(as.character(segment))))
+
+segment_levels <- combinedMetadata %>%
+  dplyr::pull(segment) %>%
+  as.character() %>%
+  trimws() %>%
+  .[nzchar(.)] %>%
+  unique() %>%
+  sort(na.last = TRUE)
+
+# Build deterministic segment colors from observed segment classes.
+# QC plots intentionally use the Okabe-Ito palette so the protocol does not
+# depend on project-specific palette files or user-supplied color settings.
+build_segment_palette <- function(segment_levels) {
+  segment_levels <- unique(trimws(as.character(segment_levels)))
+  segment_levels <- segment_levels[!is.na(segment_levels) & nzchar(segment_levels)]
+
+  # Palette cannot be built without at least one valid segment label.
+  if (length(segment_levels) == 0) stop("No non-empty segment labels detected.")
+
+  # Shared black-reserved Okabe-Ito categorical sequence (see src/utilityFunctions.R).
+  okabe_ito <- protocol_categorical_colours()
+  n_segments <- length(segment_levels)
+
+  if (n_segments <= length(okabe_ito)) {
+    segment_cols <- okabe_ito[seq_len(n_segments)]
+  } else {
+    message(
+      "Detected ", n_segments, " segment classes, which exceeds the base Okabe-Ito palette length of ",
+      length(okabe_ito), ". Extending the palette deterministically with colorRampPalette()."
+    )
+    segment_cols <- grDevices::colorRampPalette(okabe_ito)(n_segments)
+  }
+
+  setNames(segment_cols, segment_levels)
+}
+
+segment_palette <- build_segment_palette(segment_levels = segment_levels)
+
+message("Detected segments: ", paste(segment_levels[!is.na(segment_levels)], collapse = ", "))
+write_xlsx(
+  list(
+    segments = data.frame(segment = segment_levels),
+    segment_case_mapping = segment_case_mapping
+  ),
+  fs::path(out_tables, "detected_segments.xlsx")
+)
+```
+
+```{r prepare-metadata-and-match-dcc}
+# Prepare metadata for DCC matching and later stage use.
+# Design goal:
+#   1) user specifies one input column name in YAML (`sample_id_column`),
+#   2) the notebook standardizes it once to internal `sample_id`,
+#   3) only `sample_id` is used after this point (no hardcoded source column names).
+# Convert the configured sample ID column into the internal `sample_id`.
+standardize_sample_id <- function(metadata_df, source_col) {
+  source_col <- as.character(source_col)
+    # Require explicit source column to avoid silent mapping mistakes.
+  if (is.na(source_col) || !nzchar(source_col)) {
+    stop("`params$sample_id_column` is blank. Set it to the metadata column matching DCC filenames.")
+  }
+
+    # Fail with available columns so the user can correct the YAML value.
+  if (!(source_col %in% names(metadata_df))) {
+    stop(
+      "Configured sample ID column not found in merged metadata: '", source_col, "'.",
+      "\nAvailable columns: ", paste(names(metadata_df), collapse = ", "),
+      "\nUpdate params$sample_id_column in YAML to match your input file."
+    )
+  }
+
+  # This stage uses internal `sample_id` to match DCC filenames, so it is set from
+  # the configured source column. If the merged metadata already contains a
+  # different `sample_id` column (for example a patient identifier carried over
+  # from the stage 0 merge), warn that it is being replaced so the rename is not
+  # surprising.
+  if ("sample_id" %in% names(metadata_df) && !identical(source_col, "sample_id")) {
+    warning(
+      "An existing 'sample_id' column is being replaced by the values of '", source_col,
+      "', which is used here to match DCC filenames. If you need the original 'sample_id' ",
+      "values in later stages, rename that column in the metadata (for example to 'patient_id') ",
+      "before this stage.",
+      call. = FALSE
+    )
+  }
+
+  metadata_df %>%
+    dplyr::mutate(sample_id = as.character(.data[[source_col]])) %>%
+    dplyr::filter(!is.na(sample_id) & sample_id != "")
+}
+
+combinedMetadata <- combinedMetadata %>%
+  standardize_sample_id(params$sample_id_column)
+
+slide_name_present <- "slide_name" %in% names(combinedMetadata)
+metadata_rows_before_template_filter <- nrow(combinedMetadata)
+
+if (slide_name_present) {
+  slide_name_values <- trimws(as.character(combinedMetadata$slide_name))
+  missing_slide_name_rows <- is.na(slide_name_values) | !nzchar(slide_name_values)
+  template_control_rows <- !missing_slide_name_rows &
+    grepl("template", slide_name_values, ignore.case = TRUE)
+} else {
+  missing_slide_name_rows <- rep(TRUE, nrow(combinedMetadata))
+  template_control_rows <- rep(FALSE, nrow(combinedMetadata))
+}
+
+template_control_audit <- tibble::tibble(
+  Audit_item = c(
+    "slide_name column present",
+    "metadata rows before template-control exclusion",
+    "rows with missing slide_name",
+    "rows flagged as likely template controls",
+    "rows retained after template-control exclusion"
+  ),
+  Value = c(
+    as.character(slide_name_present),
+    as.character(metadata_rows_before_template_filter),
+    as.character(sum(missing_slide_name_rows, na.rm = TRUE)),
+    as.character(sum(template_control_rows, na.rm = TRUE)),
+    as.character(metadata_rows_before_template_filter - sum(template_control_rows, na.rm = TRUE))
+  ),
+  Interpretation = c(
+    "GeoMxTools expects this metadata field as 'slide name' when building the NanoStringGeoMxSet.",
+    "Rows available after sample ID normalization and before template-control filtering.",
+    "Rows retained because template-control status cannot be inferred from slide metadata.",
+    "Rows excluded before DCC matching because slide_name contains 'template' case-insensitively.",
+    "Rows carried forward into DCC matching and GeoMx object construction."
+  )
+)
+
+readr::write_csv(template_control_audit, fs::path(out_tables, "template_control_audit.csv"))
+render_protocol_table(
+  template_control_audit,
+  caption = "Template-control audit before GeoMx object construction."
+)
+
+if (!slide_name_present) {
+  warning(
+    "Column 'slide_name' was not found in merged metadata. ",
+    "No-template/template controls cannot be identified from slide metadata; ",
+    "all metadata rows will be retained for DCC matching. ",
+    "Check Outputs/1_QC/tables/template_control_audit.csv before interpreting QC results.",
+    call. = FALSE
+  )
+}
+
+if (any(template_control_rows, na.rm = TRUE)) {
+  message("Excluding ", sum(template_control_rows, na.rm = TRUE), " likely template-control row(s) before DCC matching.")
+}
+
+combinedMetadata <- combinedMetadata[!template_control_rows, , drop = FALSE]
+
+# Handle duplicate sample IDs generated by many-to-many merges in stage 0.
+# Keep one row per sample for GeoMx loading.
+if ("sample_id" %in% names(combinedMetadata)) {
+  dups <- combinedMetadata %>%
+    dplyr::count(sample_id, name = "n") %>%
+    dplyr::filter(n > 1)
+  if (nrow(dups) > 0) {
+    message("De-duplicating ", nrow(dups), " sample_id values (keeping first row).")
+    combinedMetadata <- combinedMetadata %>%
+      dplyr::arrange(sample_id) %>%
+      dplyr::group_by(sample_id) %>%
+      dplyr::slice(1) %>%
+      dplyr::ungroup()
+  }
+}
+
+# Escape regex metacharacters in sample IDs before filename matching.
+escape_regex <- function(x) gsub("([][{}()+*^$|\\?.])", "\\\\\\1", x)
+
+# Match one metadata sample ID to best DCC filename candidate.
+match_dcc_for_sample <- function(sample_id, dcc_paths) {
+  sample_id <- as.character(sample_id)
+  pat <- paste0("(^|[_\\.-])", escape_regex(sample_id), "([_\\.-]|\\.dcc$)")
+  hits <- dcc_paths[stringr::str_detect(basename(dcc_paths), regex(pat, ignore_case = TRUE))]
+
+    # Return NA when no filename match exists; handled by later validation.
+  if (length(hits) == 0) return(NA_character_)
+    # Warn but continue deterministically with first match.
+  if (length(hits) > 1) {
+    warning("Multiple DCC matches for sample_id '", sample_id, "'. Using first match: ", basename(hits[1]), call. = FALSE)
+  }
+  hits[1]
+}
+
+all_dcc <- fs::dir_ls(dir_rawdata, recurse = TRUE, regexp = "(?i)\\.dcc$", type = "file")
+dccFiles <- vapply(combinedMetadata$sample_id, match_dcc_for_sample, character(1), dcc_paths = all_dcc)
+
+# Stop early with a clear, actionable message if any metadata sample lacks a DCC
+# match. This must run BEFORE sample_id is overwritten with basename(dccFiles):
+# basename(NA) is NA, so unmatched rows would otherwise collapse to NA and trip
+# the generic stopifnot() sanity checks below with an opaque error first.
+if (any(is.na(dccFiles))) {
+  missing_ids <- combinedMetadata$sample_id[is.na(dccFiles)]
+  stop(
+    "Some sample_id values did not match any DCC filename: ",
+    paste(unique(missing_ids), collapse = ", "),
+    "\nReview sample_id naming consistency between metadata and DCC files.",
+    call. = FALSE
+  )
+}
+
+# Save original, then set sample_id to EXACT DCC basenames
+combinedMetadata <- combinedMetadata %>%
+  dplyr::mutate(
+    sample_id_raw = sample_id,
+    sample_id = basename(dccFiles)
+  )
+
+# sanity checks
+stopifnot(length(combinedMetadata$sample_id) == length(dccFiles))
+stopifnot(!anyDuplicated(combinedMetadata$sample_id))
+stopifnot(all(combinedMetadata$sample_id %in% basename(dccFiles)))
+
+```
+
+## Write Metadata for GeoMx Loading
+
+Write the final metadata table used by `readNanoStringGeoMxSet()`.
+
+```{r write-annotation-file}
+# Save metadata annotation used to build NanoStringGeoMxSet
+
+sampleAnnotationFile <- fs::path(out_tables, "completeMetadata.xlsx")
+geomxMetadata <- combinedMetadata
+
+if ("slide_name" %in% names(geomxMetadata)) {
+  names(geomxMetadata)[names(geomxMetadata) == "slide_name"] <- "slide name"
+  message("Prepared reader-only GeoMx metadata column 'slide name' from internal 'slide_name'.")
+}
+
+write_xlsx(list(annotationData = geomxMetadata), path = sampleAnnotationFile)
+
+
+```
+
+## Read Spatial Data into a GeoMx Object
+
+Construct the `NanoStringGeoMxSet` from DCC counts, PKC annotation, and prepared sample metadata.
+
+```{r read-geomx-object}
+
+# Read DCC counts and prepared annotations into a NanoStringGeoMxSet object.
+pheno_dcc_col <- "sample_id"  # Internal metadata key used to match DCC filenames to annotation rows.
+
+
+# Create GeoMx object from DCC counts + PKC + prepared annotation file.
+# `readNanoStringGeoMxSet` constructs an ExpressionSet-like object by aligning
+# DCC counts with PKC probe annotation and phenoData metadata in one step.
+spatial_data <-
+  readNanoStringGeoMxSet(
+    dccFiles = dccFiles,
+    pkcFiles = pkcFile,
+    phenoDataFile = sampleAnnotationFile,
+    phenoDataSheet = "annotationData",
+    phenoDataDccColName = pheno_dcc_col,
+    protocolDataColNames = c("aoi", "roi")
+  )
+
+if ("slide name" %in% colnames(pData(spatial_data))) {
+  pData(spatial_data)$slide_name <- pData(spatial_data)[["slide name"]]
+}
+```
+
+# Validate object structure and sample alignment
+
+Run structural checks to confirm the object dimensions and sample IDs align with the prepared metadata.
+
+```{r inspect-panel-annotation}
+
+pkcs <- annotation(spatial_data)
+module <- gsub(".pkc", "", pkcs)
+
+```
+
+```{r validate-loaded-samples}
+
+expected_ids <- combinedMetadata$sample_id            # these are basenames of dccFiles
+actual_ids   <- colnames(spatial_data)               # what actually loaded into the object
+
+missing_in_object <- setdiff(expected_ids, actual_ids)
+extra_in_object   <- setdiff(actual_ids, expected_ids)
+
+# Template-control rows were excluded during metadata preparation above;
+# this count is the intended non-template sample count.
+expectedNumSamples <- nrow(combinedMetadata)
+
+sample_alignment_summary <- tibble::tibble(
+  Check = c(
+    "Prepared metadata sample IDs",
+    "Loaded GeoMxSet sample IDs",
+    "Missing from GeoMxSet",
+    "Unexpected in GeoMxSet",
+    "Expected non-template sample count",
+    "Loaded GeoMxSet sample count"
+  ),
+  Count = c(
+    length(expected_ids),
+    length(actual_ids),
+    length(missing_in_object),
+    length(extra_in_object),
+    expectedNumSamples,
+    unname(ncol(spatial_data))
+  )
+)
+
+sample_alignment_details <- dplyr::bind_rows(
+  tibble::tibble(Issue = "Missing from GeoMxSet", sample_id = missing_in_object),
+  tibble::tibble(Issue = "Unexpected in GeoMxSet", sample_id = extra_in_object)
+)
+
+if (nrow(sample_alignment_details) == 0) {
+  sample_alignment_details <- tibble::tibble(
+    Issue = "No mismatch detected",
+    sample_id = "All prepared metadata sample IDs match the loaded GeoMxSet columns."
+  )
+}
+
+render_protocol_table(
+  sample_alignment_summary,
+  caption = "Sample alignment audit comparing prepared metadata with the loaded GeoMxSet object."
+)
+
+render_protocol_table(
+  sample_alignment_details,
+  caption = "Sample ID mismatches to resolve before proceeding, if any are present."
+)
+
+# Structural test: object dimensions and panel annotation should be sane.
+test_that("check that spatial data is the right size and annotation", {
+  expect_true(length(module) == 1 && !is.na(module) && module != "")
+  expect_equal(unname(ncol(spatial_data)), expectedNumSamples)
+  expect_true(nrow(spatial_data) > 0)
+})
+
+# Identity test: loaded sample columns should match prepared metadata IDs.
+test_that("GeoMxSet columns match expected sample IDs", {
+  expect_setequal(colnames(spatial_data), combinedMetadata$sample_id)
+})
+
+```
+
+# Segment QC summary
+
+Define segment-level sequencing QC thresholds from YAML params, then apply QC flags to each segment.
+
+These parameters are intended to be user-adjustable without changing analysis code.
+
+```{r define-segment-qc-thresholds}
+# Shift counts to one for transformations
+# `shiftCountsOne` adds a pseudocount of 1 where needed to stabilise log/transforms
+# and keep later QC math well-defined for zero-count entries.
+spatial_data <- shiftCountsOne(spatial_data, useDALogic = TRUE)
+
+# Wire the nuclei count column into segment QC BEFORE flagging. setSegmentQCFlags()
+# reads a fixed `nuclei` field, so if this dataset stores nuclei under another name
+# (or the configured qc$nuclei_column) we copy the numeric values into `nuclei`, so
+# the minNuclei threshold is actually applied instead of silently skipped.
+.qc_nuclei_candidates <- c("nuclei", "Nuclei", "nuclei_count", "Nuclei Count", "nuclei count",
+                           "NucleiCount", "Nuclei.Count", "Nuclei_Count", "nuclei.count", "nucleiCount")
+.qc_norm_key <- function(z) tolower(gsub("[^[:alnum:]]", "", trimws(as.character(z))))
+.qc_sdata_cols <- colnames(sData(spatial_data))
+.qc_nuclei_yaml <- params$qc$nuclei_column
+.qc_nuclei_yaml <- if (is.null(.qc_nuclei_yaml) || length(.qc_nuclei_yaml) == 0) "" else trimws(as.character(.qc_nuclei_yaml[[1]]))
+.qc_resolve_nuclei <- function(cands, avail) {
+  hit <- cands[cands %in% avail][1]
+  if (!is.na(hit)) return(hit)
+  ck <- .qc_norm_key(cands); ak <- .qc_norm_key(avail)
+  for (k in ck) { m <- avail[ak == k]; if (length(m) > 0) return(m[1]) }
+  NA_character_
+}
+qc_nuclei_col <- if (nzchar(.qc_nuclei_yaml)) {
+  m <- .qc_sdata_cols[.qc_sdata_cols == .qc_nuclei_yaml][1]
+  if (is.na(m)) m <- .qc_sdata_cols[.qc_norm_key(.qc_sdata_cols) == .qc_norm_key(.qc_nuclei_yaml)][1]
+  if (is.na(m)) .qc_resolve_nuclei(.qc_nuclei_candidates, .qc_sdata_cols) else m
+} else {
+  .qc_resolve_nuclei(.qc_nuclei_candidates, .qc_sdata_cols)
+}
+if (!is.na(qc_nuclei_col)) {
+  .qc_nuclei_vals <- sData(spatial_data)[[qc_nuclei_col]]
+  if (is.data.frame(.qc_nuclei_vals)) .qc_nuclei_vals <- .qc_nuclei_vals[[1]]
+  if (is.list(.qc_nuclei_vals)) .qc_nuclei_vals <- unlist(.qc_nuclei_vals, use.names = FALSE)
+  pData(spatial_data)$nuclei <- suppressWarnings(as.numeric(as.character(.qc_nuclei_vals)))
+  message("Nuclei QC: using column '", qc_nuclei_col, "' for the minNuclei segment filter.")
+
+  # Report segments with a missing/unreadable nuclei count up front. setSegmentQCFlags
+  # produces an NA nuclei flag for these, which makes their overall QC status
+  # undefined. The segment QC filter below treats an undefined status as FAIL and
+  # drops them. Surfacing the count here makes that consequence explicit instead of
+  # letting it appear as a confusing downstream error.
+  n_missing_nuclei <- sum(is.na(pData(spatial_data)$nuclei))
+  if (n_missing_nuclei > 0) {
+    warning(sprintf(
+      paste0(
+        "%d of %d segment(s) have a missing or non-numeric nuclei count in column '%s'. ",
+        "These cannot be evaluated against minNuclei (= %s), so their QC status is undefined ",
+        "and they will be treated as QC failures and removed at the segment QC filter. ",
+        "Correct the nuclei counts in the metadata if these segments should be retained."
+      ),
+      n_missing_nuclei, ncol(spatial_data), qc_nuclei_col, as.character(params$qc$minNuclei)
+    ), call. = FALSE)
+  }
+} else {
+  message("Nuclei QC: no nuclei column detected; setSegmentQCFlags will skip minNuclei (no segments removed by nuclei count).")
+}
+
+#define the thresholds for a PASS sample
+# Central QC threshold object; values come directly from YAML params.
+QC_params <- list(
+  minSegmentReads     = params$qc$minSegmentReads,
+  percentTrimmed      = params$qc$percentTrimmed,
+  percentStitched     = params$qc$percentStitched,
+  percentAligned      = params$qc$percentAligned,
+  percentSaturation   = params$qc$percentSaturation,
+  minNegativeCount    = params$qc$minNegativeCount,
+  maxNTCCount         = params$qc$maxNTCCount,
+  minNuclei           = params$qc$minNuclei,
+  minArea             = params$qc$minArea
+)
+
+
+
+```
+
+```{r apply-segment-qc-flags}
+#| message: false
+#| warning: false
+
+#apply the thresholds with experiment QC data
+# `setSegmentQCFlags` applies threshold rules and writes PASS/FAIL flags per segment
+# into the object metadata so later filtering/reporting uses the same QC flag table.
+spatial_data <-
+    setSegmentQCFlags(spatial_data, qcCutoffs = QC_params)
+
+# Summarise segment-level QC flags using the shared utility function.
+# `QCSummary` compiles flag counts and metric summaries into table outputs used below.
+QC <- QCSummary(spatial_data)
+
+QCResults <- QC$QCResults
+
+qc_table_raw <- QC$QCTable %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "QC_metric")
+
+# Build an explicit threshold table so protocol users can see
+# exactly which parameter controls each QC check.
+qc_threshold_table <- tibble::tribble(
+  ~QC_metric,            ~Threshold_value,            ~Threshold_definition,
+  "minSegmentReads",     QC_params$minSegmentReads,   "Minimum reads required per segment",
+  "percentTrimmed",      QC_params$percentTrimmed,    "Minimum trimmed-read percentage",
+  "percentStitched",     QC_params$percentStitched,   "Minimum stitched-read percentage",
+  "percentAligned",      QC_params$percentAligned,    "Minimum aligned-read percentage",
+  "percentSaturation",   QC_params$percentSaturation, "Minimum sequencing saturation percentage",
+  "minNegativeCount",    QC_params$minNegativeCount,  "Minimum negative-probe count threshold",
+  "maxNTCCount",         QC_params$maxNTCCount,       "Maximum NTC count threshold",
+  "minNuclei",           QC_params$minNuclei,         "Minimum nuclei count per segment",
+  "minArea",             QC_params$minArea,           "Minimum segment area"
+)
+
+# Summarise how many samples are flagged for each QC rule.
+# This directly addresses reviewer feedback: table values are sample counts.
+flag_candidate_cols <- names(QCResults)[vapply(QCResults, function(x) is.numeric(x) || is.logical(x), logical(1))]
+flag_cols <- setdiff(flag_candidate_cols, c("sample_id", "Sample_ID"))
+
+as_qc_flag <- function(vals) {
+  vals_num <- suppressWarnings(as.numeric(vals))
+  dplyr::case_when(
+    is.logical(vals) ~ vals,
+    all(vals_num %in% c(0, 1), na.rm = TRUE) ~ vals_num == 1,
+    TRUE ~ vals_num > 0
+  )
+}
+
+qc_flag_counts <- purrr::map_dfr(flag_cols, function(col_name) {
+  is_flagged <- as_qc_flag(QCResults[[col_name]])
+  tibble::tibble(
+    QC_metric = col_name,
+    Sample_count_flagged = sum(is_flagged, na.rm = TRUE)
+  )
+}) %>%
+  dplyr::arrange(dplyr::desc(Sample_count_flagged))
+
+# Add a per-sample total flag count for transparency.
+if (length(flag_cols) > 0) {
+  qc_results_with_total_flags <- QCResults %>%
+    dplyr::mutate(
+      TOTAL_FLAGS = rowSums(
+        dplyr::across(dplyr::all_of(flag_cols), ~ as_qc_flag(.x)),
+        na.rm = TRUE
+      )
+    )
+} else {
+  qc_results_with_total_flags <- QCResults %>%
+    dplyr::mutate(TOTAL_FLAGS = 0)
+}
+
+sample_id_cols <- intersect(c("sample_id", "Sample_ID", "sampleID", "SampleID"), names(qc_results_with_total_flags))
+qc_status_cols <- intersect("QCStatus", names(qc_results_with_total_flags))
+qc_flagged_sample_cols <- unique(c(sample_id_cols, qc_status_cols, "TOTAL_FLAGS", flag_cols))
+
+qc_flagged_samples <- qc_results_with_total_flags %>%
+  dplyr::filter(.data$TOTAL_FLAGS > 0) %>%
+  dplyr::arrange(dplyr::desc(.data$TOTAL_FLAGS)) %>%
+  dplyr::select(dplyr::all_of(qc_flagged_sample_cols))
+
+if (nrow(qc_flagged_samples) == 0) {
+  qc_flagged_samples_display <- tibble::tibble(
+    Result = "No samples had QC flags under the current thresholds."
+  )
+} else {
+  qc_flagged_samples_display <- qc_flagged_samples
+}
+
+segment_qc_flag_cols <- c(
+  "LowReads",
+  "LowTrimmed",
+  "LowStitched",
+  "LowAligned",
+  "LowSaturation",
+  "LowNegatives",
+  "LowNuclei",
+  "LowArea"
+)
+
+segment_qc_flag_counts_by_sample <- tibble::tibble(
+  Segment = as.character(sData(spatial_data)$segment)
+)
+
+for (flag_col in segment_qc_flag_cols) {
+  segment_qc_flag_counts_by_sample[[flag_col]] <- if (flag_col %in% names(qc_results_with_total_flags)) {
+    as.integer(as_qc_flag(qc_results_with_total_flags[[flag_col]]))
+  } else {
+    0L
+  }
+}
+
+qc_segment_flag_counts <- segment_qc_flag_counts_by_sample %>%
+  dplyr::group_by(Segment) %>%
+  dplyr::summarise(
+    dplyr::across(dplyr::all_of(segment_qc_flag_cols), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    TOTAL_FLAGS = rowSums(dplyr::across(dplyr::all_of(segment_qc_flag_cols)), na.rm = TRUE),
+    .before = dplyr::all_of(segment_qc_flag_cols[1])
+  ) %>%
+  dplyr::arrange(Segment)
+
+# Validate nuclei column import and prepare optional nuclei QC outputs.
+nuclei_candidates <- unique(c(
+  "nuclei",
+  "Nuclei",
+  "nuclei_count",
+  "Nuclei Count",
+  "nuclei count",
+  "NucleiCount",
+  "Nuclei.Count",
+  "Nuclei_Count",
+  "nuclei.count",
+  "nucleiCount"
+))
+available_sdata_cols <- colnames(sData(spatial_data))
+nuclei_col_from_yaml <- params$qc$nuclei_column
+if (is.null(nuclei_col_from_yaml) || length(nuclei_col_from_yaml) == 0) {
+  nuclei_col_from_yaml <- ""
+}
+nuclei_col_from_yaml <- trimws(as.character(nuclei_col_from_yaml[[1]]))
+
+normalise_column_key <- function(x) {
+  tolower(gsub("[^[:alnum:]]", "", trimws(as.character(x))))
+}
+
+resolve_nuclei_column <- function(candidates, available_cols) {
+  exact_match <- candidates[candidates %in% available_cols][1]
+  if (!is.na(exact_match)) return(exact_match)
+
+  candidate_keys <- normalise_column_key(candidates)
+  available_keys <- normalise_column_key(available_cols)
+
+  for (candidate_key in candidate_keys) {
+    matched_available <- available_cols[available_keys == candidate_key]
+    if (length(matched_available) > 0) return(matched_available[1])
+  }
+
+  NA_character_
+}
+
+nuclei_col <- NA_character_
+if (!is.na(nuclei_col_from_yaml) && nzchar(nuclei_col_from_yaml)) {
+  configured_match <- available_sdata_cols[available_sdata_cols == nuclei_col_from_yaml][1]
+  if (is.na(configured_match)) {
+    configured_key <- normalise_column_key(nuclei_col_from_yaml)
+    configured_match <- available_sdata_cols[normalise_column_key(available_sdata_cols) == configured_key][1]
+  }
+
+  if (!is.na(configured_match)) {
+    nuclei_col <- configured_match
+  } else {
+    warning(
+      "Configured nuclei column '", nuclei_col_from_yaml, "' was not found in sData(spatial_data). ",
+      "Falling back to auto-detection."
+    )
+    nuclei_col <- resolve_nuclei_column(nuclei_candidates, available_sdata_cols)
+  }
+} else {
+  nuclei_col <- resolve_nuclei_column(nuclei_candidates, available_sdata_cols)
+}
+
+nuclei_missing_note <- paste(
+  "No nuclei count column was detected in the current dataset.",
+  "Nuclei-dependent plots and tables were skipped.",
+  "If your GeoMx annotation contains nuclei counts under a project-specific column name,",
+  "set `qc$nuclei_column` in the YAML parameters and render this notebook again."
+)
+nuclei_missing_note_markdown <- paste(
+  '::: {.callout-note title="Nuclei count unavailable"}',
+  nuclei_missing_note,
+  ":::",
+  sep = "\n\n"
+)
+
+if (is.na(nuclei_col)) {
+  warning(
+    "No nuclei column was found in sData(spatial_data). Checked YAML value and fallback candidates: ",
+    paste(c(nuclei_col_from_yaml, nuclei_candidates), collapse = ", ")
+  )
+  nuclei_available <- FALSE
+  nuclei_plot_data <- NULL
+  nuclei_summary_table <- NULL
+} else {
+  nuclei_values <- sData(spatial_data)[[nuclei_col]]
+  if (is.data.frame(nuclei_values)) nuclei_values <- nuclei_values[[1]]
+  if (is.list(nuclei_values)) nuclei_values <- unlist(nuclei_values, use.names = FALSE)
+  nuclei_counts <- suppressWarnings(as.numeric(as.character(nuclei_values)))
+  invalid_nuclei_values <- !is.na(nuclei_values) & is.na(nuclei_counts)
+
+  if (any(invalid_nuclei_values)) {
+    warning(
+      "Detected nuclei column '", nuclei_col, "' contains ",
+      sum(invalid_nuclei_values), " non-numeric value(s). These values will be excluded from nuclei summaries and plots."
+    )
+  }
+
+  nuclei_available <- any(!is.na(nuclei_counts))
+
+  if (!isTRUE(nuclei_available)) {
+    nuclei_missing_note <- paste(
+      "A nuclei count column was detected in the current dataset, but no numeric nuclei values could be read.",
+      "Nuclei-dependent plots and tables were skipped.",
+      "Confirm the nuclei annotation is numeric or set `qc$nuclei_column` to the correct numeric field in the YAML parameters."
+    )
+    nuclei_missing_note_markdown <- paste(
+      '::: {.callout-note title="Nuclei count unavailable"}',
+      nuclei_missing_note,
+      ":::",
+      sep = "\n\n"
+    )
+    nuclei_plot_data <- NULL
+    nuclei_summary_table <- NULL
+  } else {
+    nuclei_plot_data <- tibble::tibble(
+      sample_id = sampleNames(spatial_data),
+      segment = as.character(sData(spatial_data)$segment),
+      nuclei_count = nuclei_counts
+    )
+
+    nuclei_summary_table <- nuclei_plot_data %>%
+      dplyr::group_by(segment) %>%
+      dplyr::summarise(
+        Samples = dplyr::n(),
+        Mean_nuclei = mean(nuclei_count, na.rm = TRUE),
+        Median_nuclei = median(nuclei_count, na.rm = TRUE),
+        Min_nuclei = min(nuclei_count, na.rm = TRUE),
+        Max_nuclei = max(nuclei_count, na.rm = TRUE),
+        .groups = "drop"
+      )
+  }
+}
+
+# Hiding a known harmless warning:
+# some environments emit xfun attr() deprecation warnings from table formatting internals.
+render_protocol_table(qc_threshold_table, caption = "QC threshold definitions used in this run.")
+render_protocol_table(qc_flag_counts, caption = "QC flag summary: sample counts flagged per metric.")
+render_protocol_table(qc_flagged_samples_display, caption = "Samples with QC flags under the current thresholds.")
+render_protocol_table(qc_segment_flag_counts, caption = "Condensed QC flag counts by segment and threshold.")
+```
+
+The tables above separate **threshold definitions** from **sample-level outcomes**:
+
+- `Sample_count_flagged` values are counts of samples flagged by each metric.
+- The samples-with-QC-flags table lists only samples with one or more flagged QC metrics, sorted by `TOTAL_FLAGS`.
+- If no samples are flagged, the table reports that no samples had QC flags under the current thresholds.
+- In the samples-with-QC-flags table, `TOTAL_FLAGS` is the number of QC metrics flagged for one sample.
+- In the condensed segment-level table, `TOTAL_FLAGS` is the summed count of threshold failures within each segment class.
+
+### QC histograms
+
+The following plots visualise key segment-level QC metrics and overlay configured cut-lines.
+
+These plots provide QC context. Review them against the thresholds and decide whether any samples need further investigation before continuing.
+
+::: panel-tabset
+## Saturation
+
+```{r qc-histogram-saturation}
+#| label: fig-saturatedQC
+#| fig-cap: Histogram of sequencing saturation percentage by segment. Segments below the configured cut-line may require QC review.
+#| fig-width: 7
+#| fig-height: 5
+#| message: false
+#| warning: false
+
+# QC histograms are intentionally colored by segment because segment class is
+# the primary GeoMx grouping used for sample-level QC review.
+col_by <- "segment"
+
+# `QC_histogram` is a workflow helper that overlays threshold cut-lines onto
+# metric distributions, making pass/fail context visually obvious during review.
+saturatedPlot <- QC_histogram(
+  sData(spatial_data), "Saturated (%)", col_by,
+  params$qc$cutline_saturation,
+  fill_cols = segment_palette
+) + labs(title = "Sequencing Saturation (%)", x = "Sequencing Saturation (%)")
+
+# Save plot files only when requested; keeps exploratory runs lightweight.
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "saturatedQC.png"),
+    plot = saturatedPlot,
+    base_height = 4,
+    base_width = 5,
+    bg = "white"
+  )
+}
+
+
+saturatedPlot
+```
+
+## Trimmed
+
+```{r}
+#| label: fig-trimmedQC
+#| fig-cap: Histogram of trimmed-read percentage by segment. Segments below the configured cut-line may indicate poor read quality.
+#| fig-width: 7
+#| fig-height: 5
+#| message: false
+#| warning: false
+
+
+# Reuse the same helper so each metric plot is comparable in style and thresholds.
+trimmedPlot <- QC_histogram(
+  sData(spatial_data), "Trimmed (%)", col_by,
+  params$qc$cutline_trimmed,
+  fill_cols = segment_palette
+)
+
+# Save plot files only when requested; keeps exploratory runs lightweight.
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "trimmedQC.png"),
+    plot = trimmedPlot,
+    base_height = 4,
+    base_width = 5,
+    bg = "white"
+  )
+}
+
+
+trimmedPlot
+
+```
+
+## Stitched
+
+```{r}
+#| label: fig-stitchedQC
+#| fig-cap: Histogram of stitched-read percentage by segment. Segments below the configured cut-line should be reviewed before later analysis.
+#| fig-width: 7
+#| fig-height: 5
+#| message: false
+#| warning: false
+
+
+
+# Stitched-read histogram follows the same templated QC plotting approach.
+stitchedPlot <- QC_histogram(
+  sData(spatial_data), "Stitched (%)", col_by,
+  params$qc$cutline_stitched,
+  fill_cols = segment_palette
+)
+
+
+# Save plot files only when requested; keeps exploratory runs lightweight.
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "stitchedQC.png"),
+    plot = stitchedPlot,
+    base_height = 4,
+    base_width = 5,
+    bg = "white"
+  )
+}
+
+stitchedPlot
+```
+
+## Aligned
+
+```{r}
+#| label: fig-alignedQC
+#| fig-cap: Histogram of aligned-read percentage by segment. Low-alignment segments may be candidates for QC exclusion.
+#| fig-width: 7
+#| fig-height: 5
+#| message: false
+#| warning: false
+
+# Alignment-rate histogram (same helper) keeps interpretation consistent across metrics.
+alignedPlot <- QC_histogram(
+  sData(spatial_data), "Aligned (%)", col_by,
+  params$qc$cutline_aligned,
+  fill_cols = segment_palette
+)
+
+
+
+# Save plot files only when requested; keeps exploratory runs lightweight.
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "alignedQC.png"),
+    plot = alignedPlot,
+    base_height = 4,
+    base_width = 5,
+    bg = "white"
+  )
+}
+
+alignedPlot
+```
+
+## Area
+
+```{r coerce-area-to-numeric}
+
+spatial_data@phenoData@data$area <- as.numeric(spatial_data@phenoData@data$area)
+
+```
+
+```{r}
+#| label: fig-areaQC
+#| fig-cap: Histogram of segment area by segment class. Very small segments may fail area-based QC thresholds.
+#| fig-width: 7
+#| fig-height: 5
+#| message: false
+#| warning: false
+
+
+# Area histogram highlights low-area segments relative to configured cut-line.
+areaPlot <- QC_histogram(
+  sData(spatial_data), "area", col_by,
+  params$qc$cutline_area,
+  scale_trans = "log10",
+  fill_cols = segment_palette
+) + ggtitle("Area")
+
+
+
+# Save plot files only when requested; keeps exploratory runs lightweight.
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "areaQC.png"),
+    plot = areaPlot,
+    base_height = 4,
+    base_width = 5,
+    bg = "white"
+  )
+}
+
+areaPlot
+```
+
+## Nuclei
+
+```{r}
+#| label: fig-nucleiQC
+#| fig-cap: Histogram of nuclei count by segment class. Segments below the configured minimum nuclei threshold may require QC review.
+#| fig-width: 7
+#| fig-height: 5
+#| message: false
+#| warning: false
+
+if (isTRUE(nuclei_available)) {
+  nuclei_histogram_data <- nuclei_plot_data %>%
+    dplyr::mutate(`Nuclei count` = .data$nuclei_count)
+
+  # Nuclei histogram uses the same QC helper, segment faceting, and threshold
+  # line style as the sequencing and area QC histograms above.
+  nucleiPlot <- QC_histogram(
+    nuclei_histogram_data,
+    "Nuclei count",
+    col_by,
+    params$qc$minNuclei,
+    fill_cols = segment_palette
+  ) + labs(title = "Nuclei Count", x = "Nuclei count")
+
+  if (isTRUE(params$save$save_plots)) {
+    save_plot(
+      filename = fs::path(out_figures, "nucleiQC.png"),
+      plot = nucleiPlot,
+      base_height = 4,
+      base_width = 5,
+      bg = "white"
+    )
+  }
+
+  nucleiPlot
+} else {
+  nucleiPlot <- ggplot() +
+    annotate(
+      "text",
+      x = 0,
+      y = 0,
+      label = stringr::str_wrap(nuclei_missing_note, width = 70),
+      lineheight = 1.15,
+      size = 3.5,
+      color = "#333333"
+    ) +
+    xlim(-1, 1) +
+    ylim(-1, 1) +
+    theme_void(base_family = protocol_font_family) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      plot.margin = margin(16, 16, 16, 16)
+    ) +
+    labs(title = "Nuclei Count")
+
+  nucleiPlot
+}
+```
+:::
+
+#### Nuclei count summary
+
+Use this table to confirm that nuclei counts were imported at the expected scale for each segment class before interpreting nuclei-dependent QC plots.
+
+```{r nuclei-summary-table}
+#| message: false
+#| warning: false
+#| results: asis
+
+if (isTRUE(nuclei_available)) {
+  render_protocol_table(
+    nuclei_summary_table,
+    caption = "Nuclei count summary by segment (used for nuclei QC context)."
+  )
+} else {
+  knitr::asis_output(nuclei_missing_note_markdown)
+}
+```
+
+### Explore relationship between area and alignment rate
+
+Create a scatter plot to inspect the relationship between segment area and alignment percentage.
+
+```{r}
+#| label: fig-areaVsAlignment
+#| fig-cap: Scatter plot of segment area versus sequencing alignment rate by segment. Clusters with low area and low alignment may require exclusion.
+#| fig-width: 5
+#| fig-height: 4
+
+# Extract and align plotting data from a single table to prevent index drift.
+# Some sData() columns can be list/data.frame-like; coerce them carefully to numeric.
+safe_numeric_col <- function(df, col) {
+  x <- df[[col]]
+  if (is.data.frame(x)) x <- x[[1]]
+  as.numeric(unlist(x, use.names = FALSE))
+}
+
+plot_sdata <- sData(spatial_data) %>% as.data.frame()
+
+alignment_df <- tibble(
+  sampleID = as.character(sampleNames(spatial_data)),
+  area = safe_numeric_col(plot_sdata, "area"),
+  alignment = safe_numeric_col(plot_sdata, "Aligned (%)"),
+  segment = factor(
+    trimws(as.character(plot_sdata$segment)),
+    levels = names(segment_palette)
+  )
+)
+
+g <- alignment_df %>%
+  ggplot(aes(x = area, y = alignment, color = segment)) +
+  geom_point() +
+  theme_cowplot(font_family = protocol_font_family) +
+  xlab("Segment Area") +
+  ylab("Alignment Rate (%)") +
+  scale_x_log10() +
+  scale_color_manual(values = segment_palette, drop = FALSE)
+
+# Save plot files only when requested; keeps exploratory runs lightweight.
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "area_vs_alignment.png"),
+    plot = g,
+    base_height = 4,
+    base_width = 5,
+    bg = "white"
+  )
+}
+
+
+g
+```
+
+### Explore relationship between alignment and nuclei count
+
+Use this diagnostic to confirm that nuclei information was imported correctly and to identify low-nuclei / low-alignment samples.
+
+```{r}
+#| label: fig-alignmentVsNuclei
+#| fig-cap: Scatter plot of alignment rate versus nuclei count by segment. Low-nuclei and low-alignment clusters may indicate compromised samples.
+#| fig-width: 6
+#| fig-height: 4
+#| message: false
+#| warning: false
+#| results: asis
+
+plot_sdata <- sData(spatial_data) %>% as.data.frame()
+
+alignment_nuclei_df <- tibble(
+  sampleID = as.character(sampleNames(spatial_data)),
+  alignment = safe_numeric_col(plot_sdata, "Aligned (%)"),
+  segment = factor(trimws(as.character(plot_sdata$segment)), levels = names(segment_palette))
+)
+
+if (isTRUE(nuclei_available)) {
+  alignment_nuclei_df <- alignment_nuclei_df %>%
+    dplyr::mutate(nuclei_count = safe_numeric_col(plot_sdata, nuclei_col))
+
+  alignment_nuclei_plot <- alignment_nuclei_df %>%
+    ggplot(aes(x = nuclei_count, y = alignment, color = segment)) +
+    geom_point(alpha = 0.9, size = 2) +
+    theme_cowplot(font_family = protocol_font_family) +
+    xlab("Nuclei count per segment") +
+    ylab("Alignment Rate (%)") +
+    scale_color_manual(values = segment_palette, drop = FALSE)
+
+  if (isTRUE(params$save$save_plots)) {
+    save_plot(
+      filename = fs::path(out_figures, "alignment_vs_nuclei.png"),
+      plot = alignment_nuclei_plot,
+      base_height = 4,
+      base_width = 6,
+      bg = "white"
+    )
+  }
+
+  alignment_nuclei_plot
+} else {
+  knitr::asis_output(nuclei_missing_note_markdown)
+}
+```
+
+### Filter flagged QC samples
+
+Retain only segments with `QCStatus == "PASS"` from the segment-level QC step.
+
+```{r filter-pass-qc-segments}
+# Keep only segments passing segment-level QC.
+#
+# QCResults must be aligned to the object's actual column order before filtering,
+# and an undefined (NA) QC status must be treated as FAIL. Indexing GeoMxSet
+# columns with a logical vector that contains NA (which happens when a QC metric
+# such as nuclei count is missing for some segments) silently corrupts sample
+# names -- they collapse to "NA", "NA.1", ... -- and then breaks the probe QC step
+# (setBioProbeQCFlags) ~50 lines later with an opaque "no non-missing arguments to
+# min; returning Inf" error rather than failing here clearly.
+stopifnot("QCStatus" %in% names(QCResults))
+
+# Align QC status to the object's columns by sample name.
+qc_status_aligned <- QCResults[sampleNames(spatial_data), "QCStatus"]
+
+# Report any segment whose QC status is undefined (NA) and explain why it is
+# dropped, so a missing nuclei count (or any other NA metric) is visible rather
+# than silently corrupting the object.
+n_na_status <- sum(is.na(qc_status_aligned))
+if (n_na_status > 0) {
+  na_ids <- sampleNames(spatial_data)[is.na(qc_status_aligned)]
+  warning(sprintf(
+    paste0(
+      "%d segment(s) have an undefined (NA) QC status and are treated as FAIL. ",
+      "This usually means a QC metric could not be computed for them (most often a ",
+      "missing nuclei count). Inspect these before trusting results: %s"
+    ),
+    n_na_status, paste(na_ids, collapse = ", ")
+  ), call. = FALSE)
+}
+
+# NA-safe pass mask: TRUE only where the status is exactly "PASS".
+qc_pass_mask <- !is.na(qc_status_aligned) & qc_status_aligned == "PASS"
+message(sprintf(
+  "Segment QC filter: %d PASS, %d removed (of %d).",
+  sum(qc_pass_mask), sum(!qc_pass_mask), length(qc_pass_mask)
+))
+
+spatial_data <- spatial_data[, qc_pass_mask]
+
+# Verify the filtered object is internally consistent before any probe QC. These
+# checks catch the corruption immediately instead of inside setBioProbeQCFlags.
+stopifnot(
+  "exprs colnames must match pData rownames after filter" =
+    identical(colnames(exprs(spatial_data)), rownames(pData(spatial_data))),
+  "no NA sample names after filter" =
+    !any(is.na(sampleNames(spatial_data))) && !any(sampleNames(spatial_data) == "NA")
+)
+message(sprintf(
+  "Post-filter object verified: %d segments x %d probes.",
+  ncol(spatial_data), nrow(spatial_data)
+))
+
+if (isTRUE(params$save$save_rds)) {
+  saveRDS(spatial_data, file = stage1_qc_pass_contract)
+}
+
+```
+
+After filtering, `r if (exists("spatial_data") && exists("sampleNames")) paste(length(sampleNames(spatial_data)), "samples remain") else "the retained sample count is calculated during execution"`.
+
+## Probe quality control
+
+Apply probe-level QC thresholds, then remove probes failing ratio/global outlier criteria.
+
+```{r apply-probe-qc-and-filter}
+#use recommended probe qc flags
+
+spatial_data <- setBioProbeQCFlags(
+  spatial_data,
+  qcCutoffs = list(
+    minProbeRatio = params$qc$minProbeRatio,
+    percentFailGrubbs = params$qc$percentFailGrubbs
+  ),
+  removeLocalOutliers = params$qc$removeLocalOutliers
+)
+
+ProbeQCResults <- fData(spatial_data)[["QCFlags"]]
+
+# Define QC table for Probe QC
+qc_df <- data.frame(Passed = sum(rowSums(ProbeQCResults[, -1]) == 0),
+                    Global = sum(ProbeQCResults$GlobalGrubbsOutlier),
+                    Local = sum(rowSums(ProbeQCResults[, -2:-1]) > 0
+                                & !ProbeQCResults$GlobalGrubbsOutlier))
+
+#Subset object to exclude all that did not pass Ratio & Global testing
+spatial_data <-
+    subset(spatial_data,
+           fData(spatial_data)[["QCFlags"]][,c("LowProbeRatio")] == FALSE &
+               fData(spatial_data)[["QCFlags"]][,c("GlobalGrubbsOutlier")] == FALSE)
+
+#Number of probes and samples remaining after QC
+dim(spatial_data)
+
+```
+
+### Negative-control versus endogenous probe distributions
+
+This plot compares endogenous and negative-control probe distributions within each segment or tissue group.
+Use this plot to check whether any segment or tissue group shows poor separation between endogenous probes and negative-control probes. Groups where these distributions overlap more strongly may need closer review.
+
+```{r}
+#| label: fig-negative-vs-endogenous-violin
+#| fig-cap: Violin plot of log2 probe counts by probe class and segment or tissue group. Strong overlap between endogenous and negative-control probes may indicate a group that needs closer QC review.
+#| fig-width: 12
+#| fig-height: 6
+#| message: false
+#| warning: false
+
+probe_expr_df <- assayDataElement(spatial_data, elt = "exprs") %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "RTS_ID") %>%
+  dplyr::left_join({
+      feature_df <- fData(spatial_data) %>% as.data.frame()
+      # Some GeoMx objects already include an RTS_ID column in feature data.
+      # Only derive from rownames when needed to avoid duplicate-column errors.
+      if (!("RTS_ID" %in% colnames(feature_df))) {
+        feature_df <- tibble::rownames_to_column(feature_df, var = "RTS_ID")
+      }
+      feature_df %>%
+        dplyr::mutate(RTS_ID = as.character(RTS_ID)) %>%
+        dplyr::select(RTS_ID, CodeClass)
+    },
+    by = "RTS_ID") %>%
+  tidyr::pivot_longer(
+    cols = -c(RTS_ID, CodeClass),
+    names_to = "Sample_ID",
+    values_to = "Expression"
+  ) %>%
+  dplyr::mutate(Expression_log2 = log2(Expression + 1))
+
+metadata_df <- pData(spatial_data) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "Sample_ID")
+
+tissue_candidates <- c("Tissue", "tissue", "annotation", "segment", "Segment", "disease_status")
+tissue_col <- tissue_candidates[tissue_candidates %in% colnames(metadata_df)][1]
+
+if (is.na(tissue_col)) {
+  tissue_col <- "Sample_ID"
+}
+
+probe_expr_annotated <- probe_expr_df %>%
+  dplyr::left_join(
+    metadata_df %>%
+      dplyr::select(Sample_ID, dplyr::all_of(tissue_col)),
+    by = "Sample_ID"
+  ) %>%
+  dplyr::mutate(
+    TissueGroup = as.character(.data[[tissue_col]]),
+    CodeClass = as.character(CodeClass)
+  ) %>%
+  dplyr::filter(CodeClass %in% c("Negative", "Endogenous"))
+
+violin_plot <- probe_expr_annotated %>%
+  ggplot(aes(x = CodeClass, y = Expression_log2, fill = CodeClass)) +
+  geom_violin(trim = FALSE, color = NA, alpha = 0.8) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "grey20", fill = "white") +
+  facet_wrap(~ TissueGroup, scales = "free_x") +
+  theme_bw(base_family = protocol_font_family) +
+  labs(
+    title = "Endogenous versus negative probe distributions",
+    x = "Probe class",
+    y = "log2(count + 1)"
+  ) +
+  # Okabe-Ito accessible colours for the two probe classes.
+  scale_fill_manual(values = c(
+    "Endogenous" = unname(protocol_okabe_ito()[["blue"]]),
+    "Negative"   = unname(protocol_okabe_ito()[["orange"]])
+  ))
+
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "negative_vs_endogenous_violin.png"),
+    plot = violin_plot,
+    base_height = 6,
+    base_width = 12,
+    bg = "white"
+  )
+}
+
+violin_plot
+```
+
+### Case consistency check
+
+This audit reports case-only variants after automatic segment-label standardization, so users can confirm whether the metadata issue has been resolved in the current run.
+
+```{r}
+#| label: case-consistency-audit
+#| message: false
+#| warning: false
+
+segment_label_candidates <- c("segment", "Segment", "annotation", "Annotation")
+segment_label_col <- segment_label_candidates[segment_label_candidates %in% colnames(pData(spatial_data))][1]
+
+if (is.na(segment_label_col)) {
+  case_audit_table <- tibble::tibble(
+    note = "No segment/annotation column was found for case-consistency auditing."
+  )
+} else {
+  segment_values <- pData(spatial_data)[[segment_label_col]] %>% as.character() %>% trimws()
+  case_audit_table <- tibble::tibble(
+    original_label = segment_values,
+    normalized_label = tolower(segment_values)
+  ) %>%
+    dplyr::filter(!is.na(original_label), original_label != "") %>%
+    dplyr::group_by(normalized_label) %>%
+    dplyr::summarise(
+      Distinct_original_labels = paste(sort(unique(original_label)), collapse = " | "),
+      Number_of_case_variants = dplyr::n_distinct(original_label),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(Number_of_case_variants > 1) %>%
+    dplyr::arrange(dplyr::desc(Number_of_case_variants))
+}
+
+if (nrow(case_audit_table) == 0 || "note" %in% colnames(case_audit_table)) {
+  render_protocol_table(
+    tibble::tibble(
+      Result = "No case-only label variants detected in the current filtered dataset, or segment column unavailable."
+    ),
+    caption = "Case-consistency audit result"
+  )
+} else {
+  render_protocol_table(
+    case_audit_table,
+    caption = "Detected case-only label variants to review before interpreting segment groups."
+  )
+}
+```
+
+Interpretation note for protocol users:
+
+- The notebook automatically standardizes segment-label case using title case during metadata preparation.
+- If case-only duplicates still appear here, they likely include additional whitespace or punctuation differences and should be corrected in the original metadata curation.
+
+## Limit of quantification (LOQ) gene filtering
+
+### Create gene-level data
+
+Collapse probe-level counts to target-level (gene-level) counts for later detection calculations.
+
+```{r aggregate-to-target-level}
+# Count unique target names before aggregation, then collapse probe counts to
+# target-level features for LOQ and detection-rate calculations.
+unique_targets_before_aggregation <- length(
+  unique(featureData(spatial_data)[["TargetName"]])
+)
+target_spatial_data <- aggregateCounts(spatial_data)
+
+# Baseline feature/segment counts entering LOQ-based detection filtering.
+# These are reused at the segment filter, gene filter, and final retention
+# summary so the notebook can report how much data each step removes and warn
+# when a large fraction is dropped (rather than silently continuing).
+qc_features_start <- nrow(target_spatial_data)
+qc_segments_start <- ncol(target_spatial_data)
+
+gene_level_aggregation_summary <- tibble::tibble(
+  Metric = c(
+    "Unique target names before aggregation",
+    "Target-level features after aggregation",
+    "Samples retained for LOQ filtering"
+  ),
+  Value = formatC(
+    c(
+      unique_targets_before_aggregation,
+      nrow(target_spatial_data),
+      ncol(target_spatial_data)
+    ),
+    format = "d",
+    big.mark = ","
+  )
+)
+
+render_protocol_table(
+  gene_level_aggregation_summary,
+  caption = "Gene-level aggregation summary after collapsing probe-level counts by target name."
+)
+
+target_preview_rows <- rownames(target_spatial_data)[
+  seq_len(min(5, nrow(target_spatial_data)))
+]
+target_preview_cols <- colnames(target_spatial_data)[
+  seq_len(min(2, ncol(target_spatial_data)))
+]
+
+gene_level_count_preview <- exprs(target_spatial_data)[
+  target_preview_rows,
+  target_preview_cols,
+  drop = FALSE
+] %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "TargetName")
+
+render_protocol_table(
+  gene_level_count_preview,
+  row.names = FALSE,
+  caption = "Preview of collapsed gene-level counts for the first targets and retained samples."
+)
+```
+
+::: {.callout-note}
+## Interpretation guidance
+This checkpoint confirms that probe-level measurements have been collapsed to one row per target name before LOQ-based detection filtering. The sample count should match the segments retained after segment-level QC. If feature or sample counts are unexpected, review the earlier probe QC, metadata alignment, and `TargetName` annotations before continuing.
+:::
+
+### Determine limit of quantification
+
+Compute per-segment LOQ using negative-control summaries and configured SD/minimum settings.
+
+```{r calculate-loq-thresholds}
+# Define LOQ SD threshold and minimum value
+
+cutoff <- params$qc$loq_cutoff_sd
+minLOQ <- params$qc$loq_min
+
+
+
+# Calculate LOQ
+LOQ <- data.frame(row.names = colnames(target_spatial_data))
+vars <- paste0(c("NegGeoMean_", "NegGeoSD_"),module)
+if(all(vars[1:2] %in% colnames(pData(target_spatial_data)))) {
+  LOQ[, module] <-
+    pmax(minLOQ,
+         pData(target_spatial_data)[, vars[1]] *
+           pData(target_spatial_data)[, vars[2]] ^ cutoff)
+}
+
+pData(target_spatial_data)$LOQ <- LOQ
+```
+
+### Determine whether each gene is above LOQ
+
+```{r build-loq-pass-matrix}
+LOQ_Mat <- c()
+ind <- fData(target_spatial_data)$Module == module
+Mat_i <- t(esApply(target_spatial_data[ind, ], 1,
+                       function(x) {
+                           x > LOQ[, module]
+                       }))
+LOQ_Mat <- rbind(LOQ_Mat, Mat_i)
+
+# Preserve ordering since this is stored outside of the geomxSet
+LOQ_Mat <- LOQ_Mat[fData(target_spatial_data)$TargetName, ]
+```
+
+### Plot the number of genes passing LOQ
+
+For each segment, the notebook counts how many genes have expression above the segment-specific LOQ threshold. It then divides that count by the number of genes in the panel to give a gene detection rate.
+
+The plot below groups segments into detection-rate bins and colors them by segment type. Higher bins mean that more genes were detected above background in those segments. Low bins are not automatically wrong, but they should be checked against nuclei count, segment area, sequencing QC metrics, slide or batch, and the role of the affected segments in the study design.
+
+```{r calculate-segment-gene-detection}
+#| message: false
+#| warning: false
+
+# Save detection rate information to pheno data
+pData(target_spatial_data)$GenesDetected <-
+    colSums(LOQ_Mat, na.rm = TRUE)
+pData(target_spatial_data)$GeneDetectionRate <-
+    pData(target_spatial_data)$GenesDetected / nrow(target_spatial_data)
+
+# Determine detection thresholds: 1%, 5%, 10%, 15%, >15%
+pData(target_spatial_data)$DetectionThreshold <-
+    cut(pData(target_spatial_data)$GeneDetectionRate,
+        breaks = c(0, 0.01, 0.05, 0.1, 0.15, 1),
+        labels = c("<1%", "1-5%", "5-10%", "10-15%", ">15%"),
+        include.lowest = TRUE, # Include zero-detection segments in the first bin.
+        right = TRUE)
+
+# Prepare the segment-level summary used by the plot and audit table.
+detection_plot_df <- pData(target_spatial_data) %>%
+  as.data.frame() %>%
+  dplyr::mutate(segment = factor(trimws(as.character(segment)), levels = names(segment_palette)))
+
+detectionRatePlot <- ggplot(detection_plot_df,
+       aes(x = DetectionThreshold)) +
+    geom_bar(aes(fill = segment)) +
+    geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5) +
+    theme_bw(base_family = protocol_font_family) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(x = "Gene Detection Rate",
+         y = "Segments, #",
+         fill = "Segment Type") +
+    scale_fill_manual(values = segment_palette, drop = FALSE)
+
+# Save plot files only when requested; keeps exploratory runs lightweight.
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "geneDetectionRatePerSegment.png"),
+    plot = detectionRatePlot,
+    base_height = 4,
+    base_width = 5,
+    bg = "white"
+  )
+}
+
+classTable <- table(pData(target_spatial_data)$DetectionThreshold,
+            pData(target_spatial_data)$segment)
+classTable <- classTable[ rowSums(classTable) > 0,]
+```
+
+```{r}
+#| label: fig-geneDetectionRate
+#| fig-cap: Segment counts by gene detection-rate bin and segment type. Lower detection bins identify segments that may need review before segment filtering.
+#| fig-width: 5
+#| fig-height: 4
+#| message: false
+#| warning: false
+detectionRatePlot
+```
+
+```{r show-segment-gene-detection-table}
+#| message: false
+#| warning: false
+
+render_protocol_table(classTable, caption = "Segment counts by gene detection-rate category.")
+
+```
+
+::: {.callout-important}
+## What to check
+
+- Expected pattern: most segments fall in bins at or above the configured per-segment detection threshold, with no key study group over-represented in the low bins.
+- Concerning pattern: many segments fall below the configured threshold, especially if they also have low nuclei count, small area, or weak sequencing QC metrics.
+- Alarming pattern: low-detection segments are concentrated in one segment type, slide, batch, tissue source, or comparison group needed for later analysis.
+:::
+
+Use the table as an audit record for the plot. It reports the same segment counts by detection-rate bin and segment type, which makes threshold changes easier to compare between runs.
+
+### Filter segments based on gene detection rate
+
+Apply the configured per-segment detection-rate threshold:
+>= `r scales::percent(params$qc$min_gene_detection_rate_per_segment, accuracy = 1)`.
+
+```{r filter-segments-by-detection-rate}
+
+# Record segment counts before and after the gene-detection-rate filter so the
+# notebook reports how many segments are removed and warns on a large or near-total
+# drop. Without this, a low-depth dataset can lose almost all segments silently and
+# break later stages (e.g. PCA) on too few samples.
+segments_before_detection_filter <- ncol(target_spatial_data)
+
+target_spatial_data <- target_spatial_data[, pData(target_spatial_data)$GeneDetectionRate >= params$qc$min_gene_detection_rate_per_segment]
+
+segments_after_detection_filter <- ncol(target_spatial_data)
+segments_dropped_detection_filter <- segments_before_detection_filter - segments_after_detection_filter
+segment_drop_fraction <- if (segments_before_detection_filter > 0) {
+  segments_dropped_detection_filter / segments_before_detection_filter
+} else {
+  0
+}
+
+message(sprintf(
+  "Segment gene-detection-rate filter (>= %s): kept %d of %d segments (%s removed).",
+  scales::percent(params$qc$min_gene_detection_rate_per_segment, accuracy = 1),
+  segments_after_detection_filter,
+  segments_before_detection_filter,
+  scales::percent(segment_drop_fraction, accuracy = 1)
+))
+
+# Warn loudly when this single step removes most segments or leaves too few to model.
+if (segment_drop_fraction >= 0.5) {
+  warning(sprintf(
+    paste0(
+      "The segment gene-detection-rate filter removed %s of segments (%d of %d). ",
+      "This is common on lower-depth datasets where fewer genes clear the cutoff. ",
+      "Consider lowering `qc$min_gene_detection_rate_per_segment` if too few segments remain."
+    ),
+    scales::percent(segment_drop_fraction, accuracy = 1),
+    segments_dropped_detection_filter,
+    segments_before_detection_filter
+  ), call. = FALSE)
+}
+if (segments_after_detection_filter < 3) {
+  warning(sprintf(
+    paste0(
+      "Only %d segment(s) remain after segment gene-detection-rate filtering. ",
+      "Later stages such as PCA and differential expression need more samples; ",
+      "relax `qc$min_gene_detection_rate_per_segment` before continuing."
+    ),
+    segments_after_detection_filter
+  ), call. = FALSE)
+}
+
+dim(target_spatial_data)
+
+```
+
+## Gene detection across segments
+
+### Calculate gene detection rate
+
+After low-detection segments are removed, this section checks detection from the gene perspective. For each threshold on the x-axis, the plot reports how many genes are detected in at least that percentage of retained segments.
+
+Use this output to decide whether the configured gene-level detection threshold retains a usable panel for later normalization and modeling. A steep drop at low segment-frequency thresholds means many genes are detected in only a small subset of segments.
+
+```{r}
+#| label: fig-geneDetectionPercentage
+#| fig-cap: Bar plot of genes detected across sample-frequency thresholds. Features with persistently low detection may be filtered before later modelling.
+#| fig-width: 5
+#| fig-height: 4
+
+# Calculate detection rate:
+LOQ_Mat <- LOQ_Mat[, colnames(target_spatial_data)]
+fData(target_spatial_data)$DetectedSegments <- rowSums(LOQ_Mat, na.rm = TRUE)
+fData(target_spatial_data)$DetectionRate <-
+    fData(target_spatial_data)$DetectedSegments / nrow(pData(target_spatial_data))
+
+# Plot detection rate:
+plot_detect <- data.frame(Freq = c(1, 5, 10, 20, 30, 50))
+plot_detect$Number <-
+    unlist(lapply(c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5),
+                  function(x) {sum(fData(target_spatial_data)$DetectionRate >= x)}))
+plot_detect$Rate <- plot_detect$Number / nrow(fData(target_spatial_data))
+rownames(plot_detect) <- plot_detect$Freq
+
+detectionPlot <- ggplot(plot_detect, aes(x = as.factor(Freq), y = Rate, fill = Rate)) +
+    geom_bar(stat = "identity") +
+    geom_text(aes(label = formatC(Number, format = "d", big.mark = ",")),
+              vjust = 1.6, color = "black", size = 4) +
+    # Detection rate is single-direction (0-100%): use the pipeline's accessible
+    # sequential scheme, viridis option C (consistent with the stage 7/8 heatmaps).
+    scale_fill_viridis_c(option = "C",
+                         limits = c(0,1),
+                         labels = scales::percent) +
+    theme_bw(base_family = protocol_font_family) +
+    scale_y_continuous(labels = scales::percent, limits = c(0,1),
+                       expand = expansion(mult = c(0, 0))) +
+    labs(x = "% of Segments",
+         y = "Genes Detected, % of Panel > LOQ") +
+  theme_cowplot(font_family = protocol_font_family)
+
+# Save plot files only when requested; keeps exploratory runs lightweight.
+if (isTRUE(params$save$save_plots)) {
+  save_plot(
+    filename = fs::path(out_figures, "geneDetection.png"),
+    plot = detectionPlot,
+    base_height = 4,
+    base_width = 5,
+    bg = "white"
+  )
+}
+
+
+
+detectionPlot
+```
+
+::: {.callout-important}
+## What to check
+
+- Expected pattern: the retained gene count declines as the threshold becomes stricter, and the configured cutoff still leaves enough genes for later analysis.
+- Concerning pattern: most genes are detected in only a small percentage of segments, suggesting weak panel-wide signal or overly strict filtering in an earlier step.
+- Alarming pattern: very few genes pass the configured gene-level threshold, especially after many segments were removed in the previous step.
+:::
+
+This plot is a QC screen rather than a biological result. If the retained gene count is unexpectedly low, review segment QC, LOQ parameters, and whether low-detection segments are concentrated in a specific technical or study group before changing thresholds.
+
+### List highly detected genes
+
+```{r show-top-detected-genes}
+#| message: false
+#| warning: false
+
+geneHits <- fData(target_spatial_data)[order(fData(target_spatial_data)$DetectedSegments,decreasing = TRUE),]
+
+#show the first 10 genes of the table as an example - note there are many gene detected in all segments
+render_protocol_table(
+  head(geneHits[, c("TargetName", "DetectionRate")], 10),
+  row.names = FALSE,
+  caption = "Top detected genes after segment-level LOQ filtering."
+)
+
+```
+
+### Filter lowly detected genes
+
+Keep genes detected in at least
+`r scales::percent(params$qc$min_gene_detection_rate_across_segments, accuracy = 1)`
+of segments, while retaining negative probes.
+
+```{r filter-low-detection-genes}
+# Messages and warnings are intentionally shown here so a large gene drop is visible.
+
+#keep the negative probes
+negativeProbefData <- subset(fData(target_spatial_data), CodeClass == "Negative")
+neg_probes <- unique(negativeProbefData$TargetName)
+
+# Record feature counts before and after gene-level detection filtering so the
+# notebook reports how many genes are removed and warns on a large drop.
+features_before_gene_filter <- nrow(target_spatial_data)
+
+target_spatial_data <-
+    target_spatial_data[fData(target_spatial_data)$DetectionRate >= params$qc$min_gene_detection_rate_across_segments |fData(target_spatial_data)$TargetName %in% neg_probes, ]
+
+features_after_gene_filter <- nrow(target_spatial_data)
+features_dropped_gene_filter <- features_before_gene_filter - features_after_gene_filter
+gene_drop_fraction <- if (features_before_gene_filter > 0) {
+  features_dropped_gene_filter / features_before_gene_filter
+} else {
+  0
+}
+
+message(sprintf(
+  "Gene detection-rate filter (>= %s of segments): kept %d of %d features (%s removed).",
+  scales::percent(params$qc$min_gene_detection_rate_across_segments, accuracy = 1),
+  features_after_gene_filter,
+  features_before_gene_filter,
+  scales::percent(gene_drop_fraction, accuracy = 1)
+))
+
+if (gene_drop_fraction >= 0.5) {
+  warning(sprintf(
+    paste0(
+      "The gene detection-rate filter removed %s of features (%d of %d). ",
+      "A near-total drop usually reflects low panel-wide signal or too few segments retained in an earlier step; ",
+      "review segment QC and `qc$min_gene_detection_rate_across_segments` before continuing."
+    ),
+    scales::percent(gene_drop_fraction, accuracy = 1),
+    features_dropped_gene_filter,
+    features_before_gene_filter
+  ), call. = FALSE)
+}
+
+#save the filtered dataset
+if (isTRUE(params$save$save_rds)) {
+  saveRDS(target_spatial_data, file = stage1_filtered_contract)
+}
+```
+
+Before moving to the next notebook, check whether enough retained segments remain for the main comparison you intend to run later. Set `key_annotation_column` in the YAML to the study group you care about most, such as `disease_status`, `condition`, or `treatment_group`. The next audit counts retained segments after gene LOQ filtering by that group and by segment type. The review threshold is only a prompt to inspect group balance; it does not filter samples.
+
+### Check Retained Segments for the Main Comparison
+
+Use this plot and table to decide whether the retained dataset is still suitable for the planned comparison. Low counts in one annotation/segment group may mean the contrast is underpowered, even if the overall QC summary looks acceptable. The dashed line marks the YAML-configured review threshold for this run (`r params$key_annotation_min_segments_per_group` retained segments per annotation/segment group). Treat this threshold as a decision aid for reviewing group balance, not as an automatic filter.
+
+```{r build-key-annotation-retained-segment-audit}
+#| message: false
+#| warning: false
+
+scalar_param <- function(x, default = "") {
+  if (is.null(x) || length(x) == 0) return(default)
+  if (is.list(x) && "value" %in% names(x)) x <- x$value
+  if (length(x) == 0) return(default)
+
+  value <- trimws(as.character(x[[1]]))
+  if (is.na(value) || !nzchar(value)) default else value
+}
+
+resolve_metadata_column <- function(configured_col, available_cols, label) {
+  if (is.na(configured_col) || !nzchar(configured_col)) return(NA_character_)
+
+  exact_match <- available_cols[available_cols == configured_col][1]
+  if (!is.na(exact_match)) return(exact_match)
+
+  configured_clean <- janitor::make_clean_names(configured_col, case = "snake")
+  available_clean <- janitor::make_clean_names(available_cols, case = "snake")
+  cleaned_match <- available_cols[available_clean == configured_clean][1]
+
+  if (!is.na(cleaned_match)) {
+    warning(
+      "Configured ", label, " column '", configured_col,
+      "' was matched after column-name cleaning as '", cleaned_match, "'.",
+      call. = FALSE
+    )
+    return(cleaned_match)
+  }
+
+  warning(
+    "Configured ", label, " column '", configured_col,
+    "' was not found. Available metadata columns: ",
+    paste(available_cols, collapse = ", "),
+    call. = FALSE
+  )
+  NA_character_
+}
+
+key_annotation_column <- scalar_param(params$key_annotation_column, default = "")
+key_annotation_min_segments <- suppressWarnings(
+  as.numeric(scalar_param(params$key_annotation_min_segments_per_group, default = "3"))
+)
+
+if (is.na(key_annotation_min_segments) || key_annotation_min_segments < 1) {
+  warning("key_annotation_min_segments_per_group must be a positive number. Using 3 for this audit.")
+  key_annotation_min_segments <- 3
+}
+
+final_segment_metadata <- pData(target_spatial_data) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "geomx_sample_id")
+
+segment_audit_col <- resolve_metadata_column(
+  configured_col = "segment",
+  available_cols = colnames(final_segment_metadata),
+  label = "segment"
+)
+
+if (is.na(segment_audit_col)) {
+  final_segment_metadata$.segment_group <- "Segment column unavailable"
+  segment_audit_col <- ".segment_group"
+}
+
+key_annotation_col <- resolve_metadata_column(
+  configured_col = key_annotation_column,
+  available_cols = colnames(final_segment_metadata),
+  label = "key annotation"
+)
+
+if (!nzchar(key_annotation_column)) {
+  key_annotation_audit_note <- paste(
+    "No key annotation column is configured.",
+    "Set `key_annotation_column` in the YAML to a metadata column such as `disease_status`",
+    "to count retained segments for the main comparison."
+  )
+  key_annotation_audit_available <- FALSE
+} else if (is.na(key_annotation_col)) {
+  key_annotation_audit_note <- paste(
+    "The configured key annotation column was not found after QC filtering:",
+    key_annotation_column,
+    "Update `key_annotation_column` to one of the available metadata columns listed in the warning."
+  )
+  key_annotation_audit_available <- FALSE
+} else {
+  key_annotation_audit_note <- ""
+  key_annotation_audit_available <- TRUE
+}
+
+if (isTRUE(key_annotation_audit_available)) {
+  key_annotation_segment_counts <- final_segment_metadata %>%
+    dplyr::transmute(
+      Key_annotation = as.character(.data[[key_annotation_col]]),
+      Segment = as.character(.data[[segment_audit_col]])
+    ) %>%
+    dplyr::mutate(
+      Key_annotation = dplyr::if_else(
+        is.na(.data$Key_annotation) | !nzchar(trimws(.data$Key_annotation)),
+        "Missing annotation",
+        trimws(.data$Key_annotation)
+      ),
+      Segment = dplyr::if_else(
+        is.na(.data$Segment) | !nzchar(trimws(.data$Segment)),
+        "Missing segment",
+        trimws(.data$Segment)
+      )
+    ) %>%
+    dplyr::count(Key_annotation, Segment, name = "Retained_segments") %>%
+    dplyr::mutate(
+      Review_threshold = key_annotation_min_segments,
+      Meets_review_threshold = .data$Retained_segments >= .data$Review_threshold
+    ) %>%
+    dplyr::arrange(Key_annotation, Segment)
+
+  readr::write_csv(
+    key_annotation_segment_counts,
+    fs::path(out_tables, "retained_segments_by_key_annotation_after_gene_loq.csv")
+  )
+
+  key_annotation_segment_counts_display <- key_annotation_segment_counts %>%
+    dplyr::mutate(
+      Meets_review_threshold = dplyr::if_else(.data$Meets_review_threshold, "Yes", "Review")
+    ) %>%
+    dplyr::rename(
+      `Key annotation` = Key_annotation,
+      `Segment type` = Segment,
+      `Retained segments` = Retained_segments,
+      `Review threshold` = Review_threshold,
+      `Meets review threshold` = Meets_review_threshold
+    )
+
+  plot_segment_values <- sort(unique(key_annotation_segment_counts$Segment))
+  plot_segment_palette <- segment_palette[intersect(plot_segment_values, names(segment_palette))]
+  missing_segment_values <- setdiff(plot_segment_values, names(plot_segment_palette))
+  if (length(missing_segment_values) > 0) {
+    extra_segment_colors <- grDevices::colorRampPalette(
+      protocol_categorical_colours()
+    )(length(missing_segment_values))
+    plot_segment_palette <- c(
+      plot_segment_palette,
+      stats::setNames(extra_segment_colors, missing_segment_values)
+    )
+  }
+  plot_segment_palette <- plot_segment_palette[plot_segment_values]
+
+  key_annotation_segment_plot <- ggplot(
+    key_annotation_segment_counts,
+    aes(x = .data$Key_annotation, y = .data$Retained_segments, fill = .data$Segment)
+  ) +
+    geom_col(
+      position = position_dodge2(width = 0.8, preserve = "single"),
+      width = 0.72,
+      color = "grey30",
+      linewidth = 0.2
+    ) +
+    geom_hline(
+      yintercept = key_annotation_min_segments,
+      linetype = "dashed",
+      color = "#8B1E3F",
+      linewidth = 0.5
+    ) +
+    geom_text(
+      aes(label = .data$Retained_segments),
+      position = position_dodge2(width = 0.8, preserve = "single"),
+      vjust = -0.35,
+      size = 3
+    ) +
+    scale_y_continuous(
+      breaks = scales::breaks_pretty(),
+      expand = expansion(mult = c(0, 0.15))
+    ) +
+    scale_fill_manual(values = plot_segment_palette, drop = FALSE) +
+    theme_bw(base_family = protocol_font_family) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "right"
+    ) +
+    labs(
+      x = key_annotation_col,
+      y = "Retained segments after gene LOQ filtering",
+      fill = "Segment type"
+    )
+
+  if (isTRUE(params$save$save_plots)) {
+    save_plot(
+      filename = fs::path(out_figures, "retained_segments_by_key_annotation_after_gene_loq.png"),
+      plot = key_annotation_segment_plot,
+      base_height = 4.8,
+      base_width = min(12, max(6, 1.2 * dplyr::n_distinct(key_annotation_segment_counts$Key_annotation))),
+      bg = "white"
+    )
+  }
+} else {
+  key_annotation_segment_counts_display <- tibble::tibble(
+    Result = key_annotation_audit_note
+  )
+
+  key_annotation_segment_plot <- ggplot() +
+    annotate(
+      "text",
+      x = 0,
+      y = 0,
+      label = stringr::str_wrap(key_annotation_audit_note, width = 75),
+      lineheight = 1.15,
+      size = 3.5,
+      color = "#333333"
+    ) +
+    xlim(-1, 1) +
+    ylim(-1, 1) +
+    theme_void(base_family = protocol_font_family) +
+    labs(caption = "Set `key_annotation_column` in the YAML to enable this retained-segment audit.")
+}
+```
+
+```{r show-key-annotation-retained-segment-table}
+#| message: false
+#| warning: false
+
+render_protocol_table(
+  key_annotation_segment_counts_display,
+  caption = "Retained segment counts after gene LOQ filtering by configured key annotation and segment type."
+)
+```
+
+```{r fig-keyAnnotationRetainedSegments}
+#| fig-cap: Retained segment counts after gene LOQ filtering by the configured key annotation and segment type. The dashed line marks the review threshold for each annotation/segment group.
+#| fig-width: 7
+#| fig-height: 5
+#| message: false
+#| warning: false
+
+key_annotation_segment_plot
+```
+
+::: {.callout-important}
+## What to check
+
+- Expected pattern: each group needed for the intended comparison has enough retained segments in the segment types you plan to analyze.
+- Concerning pattern: one disease, treatment, or condition group has only a few retained segments in a required segment type.
+- Next decision: if important groups fall below the review threshold, record the issue and decide whether to revise QC thresholds, combine groups, remove an underpowered contrast, or collect more data before differential analysis.
+:::
+
+After QC filtering, the feature and segment (sample) numbers retained, compared with
+the counts entering detection filtering, are summarised below. A large drop is
+flagged here so it is not missed before later stages.
+
+```{r final-qc-retained-summary}
+#| message: false
+
+qc_features_end <- nrow(target_spatial_data)
+qc_segments_end <- ncol(target_spatial_data)
+
+pct_retained <- function(end, start) {
+  if (is.null(start) || length(start) == 0 || is.na(start) || start <= 0) {
+    return(NA_real_)
+  }
+  end / start
+}
+
+qc_retained_summary <- tibble::tibble(
+  Measure = c("Features (genes)", "Segments (AOIs)"),
+  `Entering detection filtering` = c(qc_features_start, qc_segments_start),
+  `Retained after QC` = c(qc_features_end, qc_segments_end),
+  Removed = c(
+    qc_features_start - qc_features_end,
+    qc_segments_start - qc_segments_end
+  ),
+  `Percent retained` = scales::percent(
+    c(
+      pct_retained(qc_features_end, qc_features_start),
+      pct_retained(qc_segments_end, qc_segments_start)
+    ),
+    accuracy = 1
+  )
+)
+
+render_protocol_table(
+  qc_retained_summary,
+  row.names = FALSE,
+  caption = "Feature and segment counts entering detection filtering versus retained after QC."
+)
+
+# Surface a single, consolidated warning if QC removed a large fraction overall.
+feature_retained_fraction <- pct_retained(qc_features_end, qc_features_start)
+segment_retained_fraction <- pct_retained(qc_segments_end, qc_segments_start)
+if (!is.na(segment_retained_fraction) && segment_retained_fraction <= 0.5) {
+  warning(sprintf(
+    "QC retained only %s of segments (%d of %d). Confirm enough segments remain for the planned comparison before continuing.",
+    scales::percent(segment_retained_fraction, accuracy = 1),
+    qc_segments_end, qc_segments_start
+  ), call. = FALSE)
+}
+if (!is.na(feature_retained_fraction) && feature_retained_fraction <= 0.5) {
+  warning(sprintf(
+    "QC retained only %s of features (%d of %d). Confirm enough genes remain for normalization and modelling before continuing.",
+    scales::percent(feature_retained_fraction, accuracy = 1),
+    qc_features_end, qc_features_start
+  ), call. = FALSE)
+}
+```
+
+::: {.callout-important}
+## Check how much data QC removed
+Read the retention table above before moving on. A low **Percent retained** for
+segments is common on lower-depth datasets, where fewer genes clear the per-segment
+detection cutoff, so most segments are removed. If too few segments or features
+remain for your planned comparison, relax the detection thresholds
+(`qc$min_gene_detection_rate_per_segment` and
+`qc$min_gene_detection_rate_across_segments`) and re-render before continuing,
+because later stages such as PCA and differential expression need enough
+samples and genes to run.
+:::
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
+:::
+

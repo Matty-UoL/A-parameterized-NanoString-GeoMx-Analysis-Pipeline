@@ -1,0 +1,1521 @@
+---
+title: "Spatial Transcriptomics"
+subtitle: "Normalisation"
+date: today
+date-format: iso
+format:
+  html:
+    self-contained: true
+    theme: litera
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    lightbox: true
+    include-in-header:
+      text: |
+        <style>
+        :root {
+          --bs-body-font-family: "Segoe UI", Arial, sans-serif;
+          --bs-font-sans-serif: "Segoe UI", Arial, sans-serif;
+        }
+
+        html,
+        body,
+        .quarto-container,
+        .quarto-container *,
+        .quarto-title-block,
+        .quarto-title-block *,
+        main,
+        main *,
+        .callout,
+        .callout *,
+        #TOC,
+        #TOC *,
+        .navbar,
+        .navbar *,
+        table,
+        table *,
+        .dataTables_wrapper,
+        .dataTables_wrapper * {
+          font-family: "Segoe UI", Arial, sans-serif !important;
+        }
+        </style>
+editor: source
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+#bibliography: references.bib
+
+params:
+  # Root, same convention as QC and GeoDiff
+  project_root: "."
+  # Conservative full-path budget for cross-platform R and graphics-device compatibility.
+  portable_path_limit: 240
+
+  # Fixed folder names under root
+  dir_outputs: "Outputs"
+  dir_src: "src"
+
+  # Inputs, coming from previous stages
+  qc_stage: "1_QC"
+  qc_results_dir: "results"
+  qc_filtered_rds: "filtered_spatial_data.RDS"
+
+  geodiff_stage: "2_GeoDiff"
+  geodiff_results_dir: "results"
+  geodiff_rds: "GeoDiff_spatial_data.RDS"
+
+  # Outputs for this stage
+  out_stage: "3_Norm"
+  out_results: "results"
+  out_tables: "tables"
+  out_figures: "figures"
+  fig_subdir: "Normalisation"
+
+  # Save toggles
+  save_plots: true
+  save_rds: true
+  save_tables: true
+
+  # Reuse previously generated outputs to skip re-running normalisation
+  load_existing_norm_objects: false
+
+  # Normalisation knobs
+  q3_quantile: 0.75
+  q3_toElt: "q_norm"
+  neg_toElt: "neg_norm"
+
+  # Plot and metadata settings
+  ann_of_interest: "segment"
+
+  meta_cols:
+    value:
+      slide: "slide_name"
+      segment: "segment"
+      annotation: "segment"
+      region: "disease_status"
+
+  marker_genes: ["PTPRC", "KRT8"] # set to any marker panel used in your study
+
+  # Optional disease-label cleanup settings
+  harmonise_disease_labels: true
+---
+
+# Normalisation (3)
+
+::: {.callout-note}
+## Protocol reader guidance
+This notebook is written for users applying the workflow to their own dataset. Read each section in order, confirm required inputs before running code sections, and use the YAML parameters at the top of the file to adapt paths and thresholds for your study design.
+:::
+
+::: {.callout-warning collapse="true"}
+## Before you run
+Validate input data and metadata column names first. Most runtime issues in protocol use are caused by path mismatches, missing files, or dataset-specific column naming differences.
+:::
+::: {.callout-important}
+## Path portability check
+The setup section checks the full input and output path lengths against `portable_path_limit` before analysis begins. Generated diagnostic filenames are shortened in a fixed, repeatable way when needed, and the fixed filenames that later stages must read are never renamed. Fix any path flagged as too long before continuing.
+:::
+
+::: {.callout-caution collapse="true"}
+## Reproducibility caution
+When editing parameters, record exactly what changed (paths, thresholds, model options) in your run notes so later figures and conclusions can be reproduced during review and publication.
+:::
+
+This notebook runs the **normalisation stage** for GeoMx data using the QC-filtered object as the required input. GeoDiff outputs are optional: if a GeoDiff-filtered count object or existing GeoDiff-normalized output is present, the GeoDiff option is used; if not, GeoDiff-only sections are skipped and Q3/TMM normalisation continues.
+
+It computes multiple normalisation representations (Trimmed Mean of M-values (TMM), Q3, negative-probe, and, when available, GeoDiff-normalized `normmat`), saves processed objects, and generates comparison plots to support later method selection.
+
+The focus here is to document **what is executed and why**; this document does not interpret the resulting plots or metrics.
+
+::: {.callout-important}
+## What each saved assay contains
+This stage preserves raw count values in `exprs` for GeoMx objects. Q3-normalized values are written to the assay element configured by `params$q3_toElt` (`q_norm` by default), negative-probe-normalized values are written to `params$neg_toElt`, and GeoDiff-normalized values are written to `normmat`. The GeoDiff-normalized `normmat` assay is created from the Stage 2 GeoDiff-filtered count object (`GeoDiff_spatial_data.RDS`). The TMM output is an edgeR `DGEList` that stores raw counts plus TMM scaling factors rather than replacing the count matrix with normalized expression values.
+:::
+
+
+## How to interpret this stage
+
+Use this stage to make explicit, reproducible decisions before progressing:
+
+1. Confirm the key output objects/tables were produced without unexpected warnings.
+2. Review the stage figures in the context of your study design (technical quality, group balance, and model assumptions).
+3. Record your decision in run notes (for example: "acceptable", "rerun with adjusted parameters", or "exclude affected samples/groups") before moving to the next notebook.
+
+::: {.callout-note collapse="true"}
+### Decision checkpoint
+For publication-grade protocol reporting, capture **what you observed**, **what decision you made**, and **which parameter settings were used** at this stage.
+:::
+
+## Load libraries
+
+Load package dependencies for normalisation workflows, plotting, and data IO.
+
+```{r load-libraries}
+#| output: false
+#| message: false
+#| warning: false
+suppressPackageStartupMessages({
+  library(NanoStringNCTools)
+  library(GeomxTools)
+  library(GeoMxWorkflows)
+  library(testthat)
+  library(tidyverse)
+  library(cowplot)
+  library(janitor)
+  library(edgeR)
+  library(RUVSeq)
+  library(DESeq2)
+  library(limma)
+  library(matrixStats)
+  library(standR)
+  library(fs)
+  library(here)
+  library(glue)
+})
+
+protocol_html_family <- "Segoe UI"
+protocol_plot_family <- "sans"
+
+if (.Platform$OS.type == "windows") {
+  grDevices::windowsFonts(sans = grDevices::windowsFont(protocol_html_family))
+}
+
+protocol_cowplot_theme <- function(...) {
+  cowplot::theme_cowplot(font_family = protocol_plot_family, ...)
+}
+protocol_bw_theme <- function(...) {
+  ggplot2::theme_bw(base_family = protocol_plot_family, ...)
+}
+normalisation_boxplot_axis_text <- ggplot2::element_text(
+  family = protocol_plot_family,
+  angle = 90,
+  vjust = 0.5,
+  hjust = 1,
+  size = 4
+)
+protocol_rotated_axis_text <- ggplot2::element_text(
+  family = protocol_plot_family,
+  angle = 90,
+  vjust = 0.5,
+  hjust = 1
+)
+
+ggplot2::theme_set(protocol_cowplot_theme())
+
+```
+
+# Setup paths
+
+Resolve input/output paths from YAML params and create output folders for this stage.
+
+```{r setup-paths}
+#| label: setup-paths
+#| message: false
+#| warning: false
+
+root <- params$project_root
+# Auto-detect root when YAML root is blank/placeholder during interactive runs.
+if (is.null(root) || root == "" || root == ".") {
+  root <- here::here()
+} else {
+  root <- path_abs(root)
+}
+# here()-first helper with explicit YAML-root override when provided.
+root_via_here <- path_abs(here::here())
+use_here_root <- identical(path_abs(root), root_via_here)
+project_path <- function(...) {
+  if (use_here_root) {
+    here::here(...)
+  } else {
+    path(root, ...)
+  }
+}
+
+# Shared source helpers
+dir_src <- project_path(params$dir_src)
+path_utilities_path <- path(dir_src, "pathUtilities.R")
+if (!file_exists(path_utilities_path)) {
+  stop("Required path helper not found: ", path_utilities_path, call. = FALSE)
+}
+source(path_utilities_path)
+portable_path_limit <- protocol_validate_path_limit(params$portable_path_limit)
+utility_functions_path <- path(dir_src, "utilityFunctions.R")
+if (!file_exists(utility_functions_path)) {
+  stop(
+    "Required helper file not found: ", utility_functions_path,
+    ". Set params$project_root to the project root and params$dir_src to the helper directory name, usually 'src'.",
+    call. = FALSE
+  )
+}
+
+# Input paths
+qc_filtered_path <- project_path(params$dir_outputs, params$qc_stage, params$qc_results_dir, params$qc_filtered_rds)
+geodiff_path     <- project_path(params$dir_outputs, params$geodiff_stage, params$geodiff_results_dir, params$geodiff_rds)
+
+# Output paths
+out_base    <- project_path(params$dir_outputs, params$out_stage)
+out_results <- path(out_base, params$out_results)
+out_tables  <- path(out_base, params$out_tables)
+out_figures <- path(out_base, params$out_figures)
+out_fig_norm <- path(out_figures, params$fig_subdir)
+
+# Expected persisted objects for optional reload mode.
+tmm_rds_path <- protocol_contract_path(out_results, "TMM_normalised_spatial_data.RDS", portable_path_limit, "Stage 3 TMM object")
+tmm_minimal_counts_rds_path <- protocol_contract_path(out_results, "TMM_normalised_spatial_minimal_Counts_data.RDS", portable_path_limit, "Stage 3 minimal TMM object")
+normalised_rds_path <- protocol_contract_path(out_results, "normalised_spatial_data.RDS", portable_path_limit, "Stage 3 normalized object")
+geodiff_norm_rds_path <- protocol_contract_path(out_results, "GeoDiff_normalised_spatial_data.RDS", portable_path_limit, "Stage 3 GeoDiff-normalized object")
+
+stage3_path_audit <- protocol_path_audit(
+  c(
+    "Stage 1 filtered input" = qc_filtered_path,
+    "Optional Stage 2 input" = geodiff_path,
+    "Q3 normalized object" = normalised_rds_path,
+    "TMM normalized object" = tmm_rds_path,
+    "GeoDiff-normalized object" = geodiff_norm_rds_path,
+    "Normalization figure directory" = out_fig_norm
+  ),
+  portable_path_limit
+)
+protocol_assert_audit(stage3_path_audit, portable_path_limit)
+knitr::kable(stage3_path_audit, caption = "Stage 3 path-portability audit")
+
+dir_create(out_results, recurse = TRUE)
+dir_create(out_tables, recurse = TRUE)
+# Create figure directory only when plot saving is requested.
+if (isTRUE(params$save_plots)) dir_create(out_fig_norm, recurse = TRUE)
+
+message(glue::glue("ROOT: {root}"))
+message(glue::glue("Shared source helpers: {dir_src}"))
+message(glue::glue("QC filtered input: {qc_filtered_path}"))
+message(glue::glue("GeoDiff-filtered count object input: {geodiff_path}"))
+message(glue::glue("Normalisation output base: {out_base}"))
+
+geodiff_input_exists <- file_exists(geodiff_path)
+geodiff_norm_exists <- file_exists(geodiff_norm_rds_path)
+geodiff_route_available <- geodiff_input_exists || geodiff_norm_exists
+geodiff_route_active <- FALSE
+geodiff_skip_message <- glue::glue(
+  "GeoDiff optional route skipped: no GeoDiff-filtered count object was found at {geodiff_path} ",
+  "and no existing GeoDiff-normalized output was found at {geodiff_norm_rds_path}. ",
+  "Q3 and TMM normalisation will continue; GeoDiff-normalized outputs and plots will not be produced."
+)
+
+```
+
+## Load filtered inputs and resolve metadata columns
+
+Load the required QC-filtered object and, when available, optional GeoDiff outputs. The Stage 2 GeoDiff input is the GeoDiff-filtered count object; the Stage 3 GeoDiff output is the GeoDiff-normalized `normmat` object. If GeoDiff files are absent, the notebook reports the missing paths and continues with Q3/TMM normalisation.
+
+```{r load-filtered-inputs}
+#| message: false
+#| warning: false
+
+suppressPackageStartupMessages(
+  suppressMessages(
+    suppressWarnings(source(utility_functions_path))
+  )
+)
+target_spatial_data  <- readRDS(qc_filtered_path)
+spatial_data_geoDiff <- NULL
+ROIs_high <- character()
+
+geodiff_status_table <- tibble::tibble(
+  Input = c("QC-filtered input", "GeoDiff-filtered count object", "Existing GeoDiff-normalized output"),
+  Required_for_stage = c("Yes", "No", "No"),
+  Path = c(qc_filtered_path, geodiff_path, geodiff_norm_rds_path),
+  File_found = c(file_exists(qc_filtered_path), geodiff_input_exists, geodiff_norm_exists),
+  Action = c(
+    "Used for Q3, negative-probe, and TMM normalisation.",
+    ifelse(geodiff_input_exists, "Will be used to create GeoDiff-normalized normmat.", "GeoDiff normalization will be skipped unless an existing GeoDiff-normalized output is available."),
+    ifelse(geodiff_norm_exists, "Can be used for GeoDiff-normalized plots/output reuse.", "No existing GeoDiff-normalized output is available.")
+  )
+)
+
+knitr::kable(
+  geodiff_status_table,
+  caption = "Normalisation input file availability. GeoDiff files are optional: when absent, Q3/TMM normalisation continues and GeoDiff-only outputs are skipped."
+)
+
+if (geodiff_input_exists) {
+  spatial_data_geoDiff <- readRDS(geodiff_path)
+  message(glue::glue("GeoDiff optional route enabled: GeoDiff-filtered count object found at {geodiff_path}."))
+} else if (geodiff_norm_exists) {
+  message(glue::glue(
+    "GeoDiff optional route enabled from existing output: no GeoDiff-filtered count object was found at {geodiff_path}, ",
+    "but an existing GeoDiff-normalized output was found at {geodiff_norm_rds_path}."
+  ))
+} else {
+  message(geodiff_skip_message)
+}
+
+# Display metadata inventory with explicit interpretation for protocol readers.
+metadata_columns <- colnames(pData(target_spatial_data))
+metadata_column_inventory <- tibble::tibble(
+  column_name = metadata_columns,
+  interpretation = "Candidate metadata field available in pData(target_spatial_data)."
+)
+
+knitr::kable(
+  metadata_column_inventory,
+  caption = "Metadata column inventory in normalisation input. Use this table to confirm YAML column mappings before plotting."
+)
+
+# Provide keyword-based helper matches with explicit fallback messaging.
+metadata_keyword_matches <- tibble::tibble(
+  keyword = c("slide", "annot", "region"),
+  matched_columns = c(
+    paste(grep("slide", metadata_columns, ignore.case = TRUE, value = TRUE), collapse = ", "),
+    paste(grep("annot", metadata_columns, ignore.case = TRUE, value = TRUE), collapse = ", "),
+    paste(grep("region", metadata_columns, ignore.case = TRUE, value = TRUE), collapse = ", ")
+  )
+) %>%
+  mutate(
+    matched_columns = dplyr::if_else(
+      matched_columns == "",
+      "No columns matched this keyword in the current dataset.",
+      matched_columns
+    )
+  )
+
+knitr::kable(
+  metadata_keyword_matches,
+  caption = "Keyword-based metadata matches. These are helper hints only; set final column mappings via params$meta_cols."
+)
+
+
+# Resolve metadata column names from params
+
+meta_cols <- params$meta_cols
+# Unwrap Quarto list params that are nested under `value:`.
+if (is.list(meta_cols) && "value" %in% names(meta_cols)) meta_cols <- meta_cols$value
+
+col_slide   <- meta_cols$slide
+col_segment <- meta_cols$segment
+col_annot   <- meta_cols$annotation
+col_region  <- meta_cols$region
+
+# Segment and annotation are required for marker and sample-label plots.
+# Slide and disease status add context to distribution plots and are handled gracefully when absent.
+metadata_available <- function(col_name, pheno) {
+  !is.null(col_name) &&
+    length(col_name) == 1 &&
+    !is.na(col_name) &&
+    nzchar(col_name) &&
+    col_name %in% colnames(pheno)
+}
+
+target_pheno <- pData(target_spatial_data)
+required_meta_cols <- unique(c(col_segment, col_annot, params$ann_of_interest))
+required_meta_cols <- required_meta_cols[!is.na(required_meta_cols) & nzchar(required_meta_cols)]
+missing_required_meta_cols <- setdiff(required_meta_cols, colnames(target_pheno))
+# Fail early with explicit missing required columns to avoid opaque ggplot/data errors later.
+if (length(missing_required_meta_cols) > 0) {
+  stop(
+    "Missing required metadata columns in pData(target_spatial_data): ",
+    paste(missing_required_meta_cols, collapse = ", "),
+    ". Update params$meta_cols and params$ann_of_interest before running normalisation."
+  )
+}
+
+slide_metadata_available <- metadata_available(col_slide, target_pheno)
+region_metadata_available <- metadata_available(col_region, target_pheno)
+metadata_source_label <- function(col_name) {
+  if (is.null(col_name) || length(col_name) != 1 || is.na(col_name) || !nzchar(col_name)) {
+    return("not configured")
+  }
+  col_name
+}
+
+plot_slide_col <- ".normalisation_slide_group"
+plot_region_col <- ".normalisation_disease_group"
+plot_segment_col <- ".normalisation_segment_group"
+plot_annotation_col <- ".normalisation_annotation_label"
+
+normalisation_plot_metadata <- target_pheno
+normalisation_plot_metadata[[plot_slide_col]] <- if (slide_metadata_available) {
+  as.character(target_pheno[[col_slide]])
+} else {
+  rep("Slide metadata unavailable", nrow(target_pheno))
+}
+normalisation_plot_metadata[[plot_region_col]] <- if (region_metadata_available) {
+  as.character(target_pheno[[col_region]])
+} else {
+  rep("Disease-status metadata unavailable", nrow(target_pheno))
+}
+normalisation_plot_metadata[[plot_segment_col]] <- as.character(target_pheno[[col_segment]])
+normalisation_plot_metadata[[plot_annotation_col]] <- as.character(target_pheno[[col_annot]])
+
+normalisation_plot_metadata[[plot_slide_col]][is.na(normalisation_plot_metadata[[plot_slide_col]]) | normalisation_plot_metadata[[plot_slide_col]] == ""] <- "Slide metadata unavailable"
+normalisation_plot_metadata[[plot_region_col]][is.na(normalisation_plot_metadata[[plot_region_col]]) | normalisation_plot_metadata[[plot_region_col]] == ""] <- "Disease-status metadata unavailable"
+normalisation_plot_metadata[[plot_segment_col]][is.na(normalisation_plot_metadata[[plot_segment_col]]) | normalisation_plot_metadata[[plot_segment_col]] == ""] <- "Segment metadata unavailable"
+normalisation_plot_metadata[[plot_annotation_col]][is.na(normalisation_plot_metadata[[plot_annotation_col]]) | normalisation_plot_metadata[[plot_annotation_col]] == ""] <- "Annotation metadata unavailable"
+
+slide_legend_label <- if (slide_metadata_available) {
+  glue::glue("Slide ({col_slide})")
+} else {
+  "Slide (not available)"
+}
+region_legend_label <- if (region_metadata_available) {
+  glue::glue("Disease status ({col_region})")
+} else {
+  "Disease status (not available)"
+}
+
+normalisation_plot_grouping_summary <- tibble::tibble(
+  plot_role = c("Boxplot fill", "Boxplot facet", "Density color", "Density linetype", "Density facet"),
+  metadata_source = c(
+    metadata_source_label(col_slide),
+    metadata_source_label(col_region),
+    metadata_source_label(col_slide),
+    metadata_source_label(col_region),
+    metadata_source_label(col_segment)
+  ),
+  status = c(
+    ifelse(slide_metadata_available, "used", "not found; fallback group used"),
+    ifelse(region_metadata_available, "used", "not found; fallback group used"),
+    ifelse(slide_metadata_available, "used", "not found; fallback group used"),
+    ifelse(region_metadata_available, "used", "not found; fallback group used"),
+    "used"
+  ),
+  plot_behavior = c(
+    ifelse(slide_metadata_available, "Samples are filled by slide.", "Samples use a single slide-unavailable group."),
+    ifelse(region_metadata_available, "Samples are faceted by disease status.", "Samples use a single disease-status-unavailable facet."),
+    ifelse(slide_metadata_available, "Density curves are colored by slide.", "Density curves use a single slide-unavailable color group."),
+    ifelse(region_metadata_available, "Density curves are linetyped by disease status.", "Density curves use a single disease-status-unavailable linetype group."),
+    "Density plots are faceted by segment."
+  )
+)
+
+knitr::kable(
+  normalisation_plot_grouping_summary,
+  caption = "Normalisation distribution plot grouping summary. Use this table to confirm which metadata columns drive boxplot and density encodings."
+)
+
+if (!slide_metadata_available || !region_metadata_available) {
+  missing_optional_groupings <- c(
+    if (!slide_metadata_available) glue::glue("slide metadata column `{metadata_source_label(col_slide)}`") else NULL,
+    if (!region_metadata_available) glue::glue("disease-status metadata column `{metadata_source_label(col_region)}`") else NULL
+  )
+  message(
+    "Optional normalisation plot grouping metadata not found: ",
+    paste(missing_optional_groupings, collapse = "; "),
+    ". Distribution plots will continue with explicit fallback groups."
+  )
+}
+
+# Optional disease-label cleanup to avoid separate categories caused by spelling or case differences.
+harmonise_disease <- function(x) {
+  x_chr <- trimws(as.character(x))
+  x_low <- tolower(x_chr)
+  dplyr::case_when(
+    x_low %in% c("tumour", "tumor") ~ "tumour",
+    x_low %in% c("healthy", "normal", "control", "non-tumour", "non-tumor") ~ "healthy",
+    is.na(x_chr) | x_chr == "" ~ NA_character_,
+    TRUE ~ x_chr
+  )
+}
+
+if (isTRUE(params$harmonise_disease_labels) && region_metadata_available) {
+  pData(target_spatial_data)[, col_region] <- harmonise_disease(pData(target_spatial_data)[, col_region])
+  normalisation_plot_metadata[[plot_region_col]] <- harmonise_disease(normalisation_plot_metadata[[plot_region_col]])
+}
+
+disease_counts <- table(normalisation_plot_metadata[[plot_region_col]], useNA = "ifany")
+message("Disease-state counts in normalisation input:")
+disease_count_table <- tibble::enframe(disease_counts, name = "disease_group", value = "sample_count")
+knitr::kable(
+  disease_count_table,
+  caption = "Disease-group sample counts used by normalisation distribution plots."
+)
+if (region_metadata_available && sum(disease_counts > 0, na.rm = TRUE) < 2) {
+  knitr::asis_output(glue::glue(
+    "\n::: {{.callout-warning}}\n",
+    "## Disease-state review\n",
+    "Only one disease state is present in the normalisation input for `{col_region}`. ",
+    "Check the filtering outputs from earlier stages, including GeoDiff segment filtering, before interpreting group-faceted plots.\n",
+    ":::\n"
+  ))
+} else if (!region_metadata_available) {
+  knitr::asis_output(glue::glue(
+    "\n::: {{.callout-warning}}\n",
+    "## Disease-state review\n",
+    "The configured disease-status column `{metadata_source_label(col_region)}` was not found. ",
+    "Normalisation distribution plots will render with a single fallback disease-status group. ",
+    "Update `params$meta_cols$value$region` if disease-level comparison is required.\n",
+    ":::\n"
+  ))
+}
+
+```
+
+## Plot negative control probe summaries
+
+Generate signal-to-noise context plots comparing Q3 and negative-probe summaries by annotation groups.
+
+```{r plot-q3-vs-negative-controls}
+#| label: fig-q3vsneg
+#| fig-cap: "Signal-to-noise diagnostics comparing Q3 and negative-control probe summaries by annotation group. (A) Histograms of the per-segment Q3 and negative-probe (NegProbe) count summaries, faceted by annotation group. (B) Q3 value versus negative-probe geometric mean per segment; the dashed line marks y = x. (C) Ratio of Q3 to negative-probe geometric mean versus negative-probe geometric mean; the dashed line marks a ratio of 1. Weak separation between the Q3 and negative-probe summaries may indicate residual technical noise requiring review."
+#| fig-width: 9
+#| fig-height: 8
+
+# Graph Q3 value vs negGeoMean of Negatives
+ann_of_interest <- params$ann_of_interest
+
+#get the negative probes
+negativeProbefData <- subset(fData(target_spatial_data), CodeClass == "Negative")
+neg_probes <- unique(negativeProbefData$TargetName)
+
+Stat_data <-
+  data.frame(
+    row.names  = colnames(exprs(target_spatial_data)),
+    Segment    = colnames(exprs(target_spatial_data)),
+    Annotation = pData(target_spatial_data)[, ann_of_interest],
+    Q3         = unlist(apply(exprs(target_spatial_data), 2, quantile, params$q3_quantile, na.rm = TRUE)),
+    # Per-segment negative-probe geometric mean. drop = FALSE keeps this a matrix
+    # when several negative targets exist (otherwise the column is mislabeled raw
+    # counts, or breaks when neg_probes has length > 1).
+    NegProbe   = apply(
+      exprs(target_spatial_data)[neg_probes, , drop = FALSE], 2,
+      function(x) exp(mean(log(x[x > 0])))
+    )
+  )
+
+
+Stat_data_m <- gather(Stat_data, key = "Statistic", value = "Value", c("Q3", "NegProbe"))
+
+plt1 <- ggplot(Stat_data_m, aes(x = .data$Value, fill = .data$Statistic)) +
+  geom_histogram(bins = 40) + protocol_bw_theme() +
+  scale_x_continuous(trans = "log2") +
+  facet_wrap(~Annotation, nrow = 1) +
+  # Okabe-Ito accessible colours for the two distribution statistics.
+  scale_fill_manual(values = c(
+    "Q3"       = unname(protocol_okabe_ito()[["blue"]]),
+    "NegProbe" = unname(protocol_okabe_ito()[["orange"]])
+  )) +
+  labs(x = "Counts", y = "Segments, #")
+
+plt2 <- ggplot(Stat_data, aes(x = .data$NegProbe, y = .data$Q3, color = .data$Annotation)) +
+  geom_abline(intercept = 0, slope = 1, lty = "dashed", color = "darkgray") +
+  geom_point() + guides(color = "none") + protocol_bw_theme() +
+  scale_x_continuous(trans = "log2") +
+  scale_y_continuous(trans = "log2") +
+  theme(aspect.ratio = 1) +
+  labs(x = "Negative Probe GeoMean, Counts", y = "Q3 Value, Counts")
+
+plt3 <- ggplot(Stat_data, aes(x = .data$NegProbe, y = .data$Q3 / .data$NegProbe, color = .data$Annotation)) +
+  geom_hline(yintercept = 1, lty = "dashed", color = "darkgray") +
+  geom_point() + protocol_bw_theme() +
+  scale_x_continuous(trans = "log2") +
+  scale_y_continuous(trans = "log2") +
+  theme(aspect.ratio = 1) +
+  labs(x = "Negative Probe GeoMean, Counts", y = "Q3/NegProbe Value, Counts")
+
+# Bottom row: place the two scatter plots side by side with an empty spacer
+# column between them so their axis titles no longer overlap, and give the second
+# scatter its own "C" label (it was previously unlabelled, so the figure appeared
+# to contain only panels A and B).
+btm_row <- plot_grid(
+  plt2, NULL, plt3,
+  nrow = 1,
+  labels = c("B", "", "C"),
+  rel_widths = c(0.42, 0.1, 0.48)
+)
+q3vsneg <- plot_grid(plt1, btm_row, ncol = 1, labels = c("A", ""), rel_heights = c(0.48, 0.52))
+
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "q3vsneg.png"), plot = q3vsneg,
+            base_height = 8, base_width = 10, bg = "white")
+}
+
+
+
+q3vsneg
+
+```
+
+# Explore normalisation methods
+
+## Perform TMM normalisation
+
+Construct two edgeR objects and compute TMM normalisation factors for later use.
+
+- `tmm_dge_with_metadata`: full `DGEList` with counts, sample metadata, and feature annotations (used for most later summaries/plots).
+- `tmm_dge_counts_only`: minimal `DGEList` containing counts plus TMM factors only. This object is not read by later notebooks in the current pipeline; it is retained for audit checks.
+
+```{r perform-tmm-normalisation}
+#| output: false
+#| message: false
+#| warning: false
+
+if (isTRUE(params$load_existing_norm_objects) && file_exists(tmm_rds_path)) {
+  tmm_dge_with_metadata <- readRDS(tmm_rds_path)
+  if (file_exists(tmm_minimal_counts_rds_path)) {
+    tmm_dge_counts_only <- readRDS(tmm_minimal_counts_rds_path)
+  } else {
+    tmm_dge_counts_only <- DGEList(counts = exprs(target_spatial_data))
+    tmm_dge_counts_only <- calcNormFactors(tmm_dge_counts_only, method = "TMM")
+  }
+  message(glue::glue("Loaded full TMM DGEList (with metadata): {tmm_rds_path}"))
+  message(glue::glue("Loaded/constructed minimal TMM DGEList (counts only): {tmm_minimal_counts_rds_path}"))
+} else {
+  # Align phenotype rows with expression matrix columns before DGEList creation.
+  pheno <- pData(target_spatial_data)[row.names(pData(target_spatial_data)) %in% colnames(exprs(target_spatial_data)),]
+
+  # Align feature annotation rows with expression matrix rows.
+  genes <- fData(target_spatial_data)[row.names(fData(target_spatial_data)) %in% rownames(exprs(target_spatial_data)),]
+
+  tmm_dge_with_metadata <- DGEList(counts = exprs(target_spatial_data), lib.size = colSums(exprs(target_spatial_data)),
+          samples = pheno,
+          genes = genes)
+
+  # `calcNormFactors(..., method='TMM')` estimates composition-bias correction factors
+  # used by edgeR CPM calculations for between-sample comparability.
+  tmm_dge_with_metadata <- calcNormFactors(tmm_dge_with_metadata, method = "TMM")
+
+  tmm_dge_counts_only <- DGEList(counts = exprs(target_spatial_data))
+  # Secondary minimal DGEList version retained for compatibility checks.
+  tmm_dge_counts_only <- calcNormFactors(tmm_dge_counts_only, method = "TMM")
+
+  # Persist normalised objects only when save_rds toggle is enabled.
+  if (isTRUE(params$save_rds)) {
+    # TMM_normalised_spatial_data.RDS: full metadata-rich TMM DGEList used by later notebooks.
+    saveRDS(tmm_dge_with_metadata,  file = tmm_rds_path)
+    # TMM_normalised_spatial_minimal_Counts_data.RDS: minimal counts-only TMM DGEList retained for lightweight audit use.
+    saveRDS(tmm_dge_counts_only, file = tmm_minimal_counts_rds_path)
+  }
+}
+
+# This alias supports later code sections that still use the older object name.
+TMM_norm_data <- tmm_dge_with_metadata
+
+```
+
+::: {.callout-note}
+## TMM output files
+Use `TMM_normalised_spatial_data.RDS` for later analysis because it preserves the raw count matrix, TMM normalization factors, sample metadata, and feature annotations required by later stages. `TMM_normalised_spatial_minimal_Counts_data.RDS` is a compact counts-only TMM object retained for audit checks; later notebooks in the current pipeline do not read it.
+:::
+
+```{r summarise-tmm-outputs}
+#| echo: false
+#| message: false
+#| warning: false
+
+tmm_output_summary <- tibble::tibble(
+  output_file = c(path_file(tmm_rds_path), path_file(tmm_minimal_counts_rds_path)),
+  object_created = c("tmm_dge_with_metadata", "tmm_dge_counts_only"),
+  contents = c(
+    "Full metadata-rich TMM DGEList with raw counts, TMM scaling factors, sample metadata, and feature annotations.",
+    "Minimal counts-only TMM DGEList with TMM scaling factors."
+  ),
+  pipeline_role = c(
+    "Primary TMM output used by this notebook and later stages.",
+    "Optional audit file; not read by later notebooks in the current pipeline."
+  )
+)
+
+knitr::kable(
+  tmm_output_summary,
+  caption = "TMM normalisation output summary. Inspect the metadata-rich object before later analysis; use the minimal counts-only object only for audit checks."
+)
+
+```
+
+## Perform Q3 normalisation
+
+Apply upper-quantile normalisation at the configured quantile to produce a Q3-normalised assay.
+
+```{r perform-q3-normalisation}
+#| output: false
+#| message: false
+#| warning: false
+
+if (isTRUE(params$load_existing_norm_objects) && file_exists(normalised_rds_path)) {
+  target_spatial_data <- readRDS(normalised_rds_path)
+  message(glue::glue("Loaded existing normalised GeoMx object from: {normalised_rds_path}"))
+} else {
+  # Q3 norm (75th percentile) for WTA/CTA  with or without custom spike-ins
+  # `NanoStringNCTools::normalize` with `norm_method = "quant"` applies upper-quantile
+  # scaling and writes the result into `toElt` while preserving raw counts in `exprs`.
+  target_spatial_data <- NanoStringNCTools::normalize(target_spatial_data ,
+                               norm_method = "quant", 
+                               desiredQuantile = params$q3_quantile,
+                               toElt = params$q3_toElt)
+}
+
+if (!(params$q3_toElt %in% assayDataElementNames(target_spatial_data))) {
+  stop("Q3 assay '", params$q3_toElt, "' was not found in target_spatial_data.")
+}
+
+```
+
+## Perform negative probe normalisation
+
+Apply negative-probe normalisation and save the combined normalised GeoMx object.
+
+```{r perform-negative-probe-normalisation}
+#| output: false
+#| message: false
+#| warning: false
+
+if (!(isTRUE(params$load_existing_norm_objects) && file_exists(normalised_rds_path))) {
+  # neg
+  # `NanoStringNCTools::normalize` with `norm_method = "neg"` scales expression by
+  # negative-control probes to reduce background-driven technical variation.
+  target_spatial_data <- NanoStringNCTools::normalize(target_spatial_data ,
+                               norm_method = "neg",
+                               toElt = params$neg_toElt
+  )
+
+  # This RDS file contains both the Q3 and negative normalisation.
+  # Persist normalised objects only when save_rds toggle is enabled.
+  if (isTRUE(params$save_rds)) {
+    saveRDS(target_spatial_data, file = normalised_rds_path)
+  }
+}
+
+if (!(params$neg_toElt %in% assayDataElementNames(target_spatial_data))) {
+  stop("Negative-probe assay '", params$neg_toElt, "' was not found in target_spatial_data.")
+}
+
+```
+
+## Perform GeoDiff-normalized normmat calculation
+
+Run Poisson-threshold normalisation using the GeoDiff-filtered count object and configured high-quality segment/feature inputs.
+
+```{r perform-geodiff-normalisation}
+#| output: false
+#| message: false
+#| warning: false
+
+if (isTRUE(params$load_existing_norm_objects) && file_exists(geodiff_norm_rds_path)) {
+  spatial_data_geoDiff <- readRDS(geodiff_norm_rds_path)
+  ROIs_high <- sampleNames(spatial_data_geoDiff)
+  geodiff_route_active <- TRUE
+  message(glue::glue("Loaded existing GeoDiff-normalized object from: {geodiff_norm_rds_path}"))
+} else if (!geodiff_input_exists && geodiff_norm_exists) {
+  spatial_data_geoDiff <- readRDS(geodiff_norm_rds_path)
+  ROIs_high <- sampleNames(spatial_data_geoDiff)
+  geodiff_route_active <- TRUE
+  message(glue::glue(
+    "Loaded existing GeoDiff-normalized object from {geodiff_norm_rds_path} because no GeoDiff-filtered count object was available."
+  ))
+} else if (geodiff_input_exists) {
+  if (!requireNamespace("GeoDiff", quietly = TRUE)) {
+    stop(
+      "GeoDiff optional route is available because a GeoDiff-filtered count object exists, but the GeoDiff package is not installed. ",
+      "Install GeoDiff or remove the GeoDiff-filtered count object file if you intend to run only Q3/TMM normalisation.",
+      call. = FALSE
+    )
+  }
+
+  if (is.null(spatial_data_geoDiff)) {
+    spatial_data_geoDiff <- readRDS(geodiff_path)
+  }
+
+  posdat <- spatial_data_geoDiff[-which(fData(spatial_data_geoDiff)$CodeClass == "Negative"), ]
+  features_all <- rownames(posdat)
+  # GeoDiff high-signal feature mask is used to subset matrix before plotting/comparison.
+  features_high <- rownames(fData(spatial_data_geoDiff))[fData(spatial_data_geoDiff)$feature_high_fitNBth == 1]
+
+  ROIs_high <- sampleNames(spatial_data_geoDiff)
+
+  spatial_data_geoDiff <- GeoDiff::fitPoisthNorm(object = spatial_data_geoDiff,
+                          ROIs_high = ROIs_high,
+                          features_high=features_high,features_all=features_all,
+                          threshold_mean = notes(spatial_data_geoDiff)[["bgMean"]],
+                          sizescalebythreshold = TRUE)
+
+  geodiff_route_active <- TRUE
+
+  # Only save high quality segments
+  # Persist normalised objects only when save_rds toggle is enabled.
+  if (isTRUE(params$save_rds)) {
+    saveRDS(spatial_data_geoDiff[, ROIs_high], file = geodiff_norm_rds_path)
+  }
+} else {
+  message(geodiff_skip_message)
+}
+
+if (isTRUE(geodiff_route_active) && !("normmat" %in% assayDataElementNames(spatial_data_geoDiff))) {
+  stop("GeoDiff assay 'normmat' was not found in spatial_data_geoDiff.")
+}
+
+```
+
+# Compare normalisation outputs
+
+## Boxplots and density plots of normalised data
+
+This section produces a consistent set of visual summaries (boxplots and densities) across normalisation methods to support side-by-side technical comparison.
+
+For each method, both boxplots and density plots now show **slide** and **disease-status** context:
+
+- boxplots: fill by slide and facet by disease status,
+- densities: color by slide and linetype by disease status.
+
+Sample labels are keyed by sample name so they remain correct when disease-status facets use independent x-axis scales.
+
+```{r prepare-normalisation-distribution-labels}
+#| output: false
+#| message: false
+#| warning: false
+
+normalisation_sample_labels <- stats::setNames(
+  janitor::make_clean_names(
+    normalisation_plot_metadata[[plot_annotation_col]],
+    case = "parsed"
+  ),
+  rownames(normalisation_plot_metadata)
+)
+
+normalisation_sample_axis_labels <- function(sample_ids) {
+  resolved_labels <- unname(normalisation_sample_labels[sample_ids])
+  unresolved <- is.na(resolved_labels) | resolved_labels == ""
+  resolved_labels[unresolved] <- sample_ids[unresolved]
+  resolved_labels
+}
+```
+
+::: panel-tabset
+## Raw data
+
+The plots below provide a baseline view of unnormalised count distributions.
+
+```{r plot-raw-distributions}
+#| label: fig-rawdataBoxplot
+#| fig-cap: Boxplot of raw expression distributions by sample. Fill shows slide metadata and facets show disease-status metadata when those columns are available. Large distribution shifts may indicate technical effects before normalisation.
+#| fig-width: 14
+#| fig-height: 5.5
+rawData <- log2(exprs(target_spatial_data)) %>%  as.data.frame() %>%
+  gather() 
+
+
+metaData <- normalisation_plot_metadata
+
+
+
+rawDataPlot <- merge(rawData, metaData, by.x = "key", by.y = "row.names") %>%
+  ggplot(aes(x = .data$key, y = .data$value, fill = .data[[plot_slide_col]])) +
+  geom_boxplot() +
+  ylab("log2 raw counts") + xlab("Segment") +
+  labs(fill = slide_legend_label) +
+  protocol_cowplot_theme() +
+  scale_x_discrete(labels = normalisation_sample_axis_labels) +
+  facet_wrap(vars(!!rlang::sym(plot_region_col)), scales = "free_x") +
+  theme(axis.text.x = normalisation_boxplot_axis_text)
+
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "rawDataBoxplots.png"), plot = rawDataPlot,
+            base_height = 8, base_width = 8, bg = "white")
+}
+
+
+print(rawDataPlot)
+
+```
+
+```{r plot-raw-density}
+#| label: fig-rawdataDensity
+#| fig-cap: Density plot of raw expression distributions. Color shows slide metadata, linetype shows disease-status metadata, and facets show segment metadata when those columns are available. Broad between-sample spread should reduce after normalisation.
+#| fig-width: 12
+#| fig-height: 5.5
+
+
+
+rawDataDensity <- rawData %>%
+  merge(., metaData, by.x = "key", by.y = "row.names") %>%
+  ggplot(aes(x = .data$value, color = .data[[plot_slide_col]], linetype = .data[[plot_region_col]])) +
+  geom_density() +
+  ylab("log2 raw counts") + xlab("Segment") +
+  labs(color = slide_legend_label, linetype = region_legend_label) +
+  protocol_cowplot_theme() +
+  theme(axis.text.x = protocol_rotated_axis_text) +
+  theme(legend.position = "right") +
+  facet_wrap(vars(!!rlang::sym(plot_segment_col)))
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "rawDataDensity.png"), plot = rawDataDensity,
+            base_height = 8, base_width = 8, bg = "white")
+}
+
+
+print(rawDataDensity)
+
+
+```
+
+## TMM normalised
+
+```{r plot-tmm-distributions}
+#| label: fig-TMMBoxplot
+#| fig-cap: Boxplot of TMM-normalised expression distributions by sample. Fill shows slide metadata and facets show disease-status metadata when those columns are available. Improved alignment supports using TMM for later testing.
+#| fig-width: 14
+#| fig-height: 5.5
+
+TMMNormalised <- cpm(TMM_norm_data, log=TRUE) %>%  as.data.frame() %>%
+  gather() 
+
+
+metaData <- normalisation_plot_metadata
+
+
+TMMNormalisedPlot <- merge(TMMNormalised, metaData, by.x = "key", by.y = "row.names") %>%
+  ggplot(aes(x = .data$key, y = .data$value, fill = .data[[plot_slide_col]])) +
+  geom_boxplot() +
+  ylab("log2 TMM counts") + xlab("Segment") +
+  labs(fill = slide_legend_label) +
+  protocol_cowplot_theme() +
+  scale_x_discrete(labels = normalisation_sample_axis_labels) +
+  facet_wrap(vars(!!rlang::sym(plot_region_col)), scales = "free_x") +
+  theme(axis.text.x = normalisation_boxplot_axis_text)
+
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "TMMNormalisedPlot.png"), plot = TMMNormalisedPlot,
+            base_height = 8, base_width = 8, bg = "white")
+}
+
+
+print(TMMNormalisedPlot)
+
+```
+
+```{r plot-tmm-density}
+#| label: fig-TMMDensity
+#| fig-cap: Density plot of TMM-normalised expression distributions. Color shows slide metadata, linetype shows disease-status metadata, and facets show segment metadata when those columns are available. Overlap by disease group indicates how well technical scaling reduced between-sample shifts.
+#| fig-width: 12
+#| fig-height: 5.5
+
+
+
+
+TMMNormalisedDensity <- TMMNormalised %>%
+  merge(., metaData, by.x = "key", by.y = "row.names") %>%
+  ggplot(aes(x = .data$value, color = .data[[plot_slide_col]], linetype = .data[[plot_region_col]])) +
+  geom_density() +
+  ylab("log2 TMM counts") + xlab("Segment") +
+  labs(color = slide_legend_label, linetype = region_legend_label) +
+  protocol_cowplot_theme() +
+  theme(axis.text.x = protocol_rotated_axis_text) +
+  theme(legend.position = "right") +
+  facet_wrap(vars(!!rlang::sym(plot_segment_col)))
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "TMMNormalisedDensity.png"), plot = TMMNormalisedDensity,
+            base_height = 8, base_width = 8, bg = "white")
+}
+
+
+print(TMMNormalisedDensity)
+
+```
+
+## Q3 normalised
+
+This panel displays the Q3-normalised distributions using the same plotting structure as other methods.
+
+```{r plot-q3-distributions}
+#| label: fig-Q3Boxplot
+#| fig-cap: Boxplot of Q3-normalised expression distributions by sample. Fill shows slide metadata and facets show disease-status metadata when those columns are available. Improved central tendency alignment supports quantile-based scaling.
+#| fig-width: 14
+#| fig-height: 5.5
+
+q3Normalised <- log2(assayDataElement(target_spatial_data, elt = params$q3_toElt)) %>%  as.data.frame() %>%
+  gather() 
+
+metaData <- normalisation_plot_metadata
+
+
+q3NormalisedPlot <- merge(q3Normalised, metaData, by.x = "key", by.y = "row.names") %>%
+  ggplot(aes(x = .data$key, y = .data$value, fill = .data[[plot_slide_col]])) +
+  geom_boxplot() +
+  ylab("log2 Q3 counts") + xlab("Segment") +
+  labs(fill = slide_legend_label) +
+  protocol_cowplot_theme() +
+  scale_x_discrete(labels = normalisation_sample_axis_labels) +
+  facet_wrap(vars(!!rlang::sym(plot_region_col)), scales = "free_x") +
+  theme(axis.text.x = normalisation_boxplot_axis_text)
+
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "Q3NormalisedPlot.png"), plot = q3NormalisedPlot,
+            base_height = 8, base_width = 8, bg = "white")
+}
+
+
+print(q3NormalisedPlot)
+
+```
+
+```{r plot-q3-density}
+#| label: fig-Q3Density
+#| fig-cap: Density plot of Q3-normalised expression distributions. Color shows slide metadata, linetype shows disease-status metadata, and facets show segment metadata when those columns are available. Density overlap by disease group helps assess post-normalisation comparability.
+#| fig-width: 12
+#| fig-height: 5.5
+
+
+
+q3NormalisedDensity <- q3Normalised %>%
+  merge(., metaData, by.x = "key", by.y = "row.names") %>%
+  ggplot(aes(x = .data$value, color = .data[[plot_slide_col]], linetype = .data[[plot_region_col]])) +
+  geom_density() +
+  ylab("log2 Q3 counts") + xlab("Segment") +
+  labs(color = slide_legend_label, linetype = region_legend_label) +
+  protocol_cowplot_theme() +
+  theme(axis.text.x = protocol_rotated_axis_text) +
+  theme(legend.position = "right") +
+  facet_wrap(vars(!!rlang::sym(plot_segment_col)))
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "q3NormalisedDensity.png"), plot = q3NormalisedDensity,
+            base_height = 8, base_width = 8, bg = "white")
+}
+
+
+
+print(q3NormalisedDensity)
+
+```
+
+## Negative probe normalisation
+
+```{r plot-negprobe-distributions}
+#| label: fig-negProbeBoxplot
+#| fig-cap: Boxplot of negative-probe-normalised expression distributions by sample. Fill shows slide metadata and facets show disease-status metadata when those columns are available. Residual offsets may indicate unresolved background effects.
+#| fig-width: 14
+#| fig-height: 5.5
+
+negProbeNormalised <- log2(assayDataElement(target_spatial_data, elt = params$neg_toElt)) %>%  as.data.frame() %>%
+  gather() 
+
+
+metaData <- normalisation_plot_metadata
+
+
+negProbeNormalisedPlot <- merge(negProbeNormalised, metaData, by.x = "key", by.y = "row.names") %>%
+  ggplot(aes(x = .data$key, y = .data$value, fill = .data[[plot_slide_col]])) +
+  geom_boxplot() +
+  ylab("log2 negProbe counts") + xlab("Segment") +
+  labs(fill = slide_legend_label) +
+  protocol_cowplot_theme() +
+  scale_x_discrete(labels = normalisation_sample_axis_labels) +
+  facet_wrap(vars(!!rlang::sym(plot_region_col)), scales = "free_x") +
+  theme(axis.text.x = normalisation_boxplot_axis_text)
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "negProbeNormalisedPlot.png"), plot = negProbeNormalisedPlot,
+            base_height = 8, base_width = 8, bg = "white")
+}
+
+
+print(negProbeNormalisedPlot)
+
+```
+
+```{r plot-negprobe-density}
+#| label: fig-negProbeDensity
+#| fig-cap: Density plot of negative-probe-normalised expression distributions. Color shows slide metadata, linetype shows disease-status metadata, and facets show segment metadata when those columns are available. Persistent separation may indicate residual background structure.
+#| fig-width: 12
+#| fig-height: 5.5
+
+
+negProbeNormalisedDensity <- negProbeNormalised %>%
+  merge(., metaData, by.x = "key", by.y = "row.names") %>%
+  ggplot(aes(x = .data$value, color = .data[[plot_slide_col]], linetype = .data[[plot_region_col]])) +
+  geom_density() +
+  ylab("log2 negProbe counts") + xlab("Segment") +
+  labs(color = slide_legend_label, linetype = region_legend_label) +
+  protocol_cowplot_theme() +
+  theme(axis.text.x = protocol_rotated_axis_text) +
+  theme(legend.position = "right") +
+  facet_wrap(vars(!!rlang::sym(plot_segment_col)))
+
+# Save this figure only when persistence is enabled in YAML.
+if (isTRUE(params$save_plots)) {
+  save_plot(filename = path(out_fig_norm, "negProbeNormalisedDensity.png"), plot = negProbeNormalisedDensity,
+            base_height = 8, base_width = 8, bg = "white")
+}
+
+
+print(negProbeNormalisedDensity)
+
+```
+
+## GeoDiff normalized
+
+This panel displays GeoDiff-normalized `normmat` distributions for the same metadata groupings.
+
+```{r plot-geodiff-distributions}
+#| message: false
+#| warning: false
+#| label: fig-GeoDiffBoxplot
+#| fig-cap: Boxplot of GeoDiff-normalized normmat expression distributions by sample. Fill shows slide metadata and facets show disease-status metadata when those columns are available. Stable distributions support using GeoDiff-normalized matrices in later stages.
+#| fig-width: 14
+#| fig-height: 5.5
+if (isTRUE(geodiff_route_active)) {
+  geoDiffNormalised <- assayDataElement(spatial_data_geoDiff[, ROIs_high], elt = "normmat") %>%  as.data.frame() %>%  gather()
+
+  metaData <- normalisation_plot_metadata
+
+
+  geoDiffNormalisedPlot <- merge(geoDiffNormalised, metaData, by.x = "key", by.y = "row.names") %>%
+    ggplot(aes(x = .data$key, y = .data$value, fill = .data[[plot_slide_col]])) +
+    geom_boxplot() +
+    ylab("log Poisson Threshold Normalized values") + xlab("Segment") +
+    labs(fill = slide_legend_label) +
+    protocol_cowplot_theme() +
+    scale_x_discrete(labels = normalisation_sample_axis_labels) +
+    facet_wrap(vars(!!rlang::sym(plot_region_col)), scales = "free_x") +
+    theme(axis.text.x = normalisation_boxplot_axis_text)
+
+
+  # Save this figure only when persistence is enabled in YAML.
+  if (isTRUE(params$save_plots)) {
+    save_plot(filename = path(out_fig_norm, "geoDiffNormalisedPlot.png"), plot = geoDiffNormalisedPlot,
+              base_height = 8, base_width = 8, bg = "white")
+  }
+
+  print(geoDiffNormalisedPlot)
+} else {
+  message(glue::glue(
+    "GeoDiff boxplot skipped: no GeoDiff-normalized object is available at {geodiff_norm_rds_path}. ",
+    "Q3/TMM boxplots above remain available for non-GeoDiff review."
+  ))
+}
+
+```
+
+```{r plot-geodiff-density}
+#| message: false
+#| warning: false
+#| label: fig-GeoDiffDensity
+#| fig-cap: Density plot of GeoDiff-normalized normmat expression distributions. Color shows slide metadata, linetype shows disease-status metadata, and facets show segment metadata when those columns are available. Tight overlap supports cross-sample comparability after normalisation.
+#| fig-width: 12
+#| fig-height: 5.5
+if (isTRUE(geodiff_route_active)) {
+
+
+  geoDiffNormalisedDensity <- geoDiffNormalised %>%
+    merge(., metaData, by.x = "key", by.y = "row.names") %>%
+    ggplot(aes(x = .data$value, color = .data[[plot_slide_col]], linetype = .data[[plot_region_col]])) +
+    geom_density() +
+    ylab("log Poisson Threshold Normalized values") + xlab("Segment") +
+    labs(color = slide_legend_label, linetype = region_legend_label) +
+    protocol_cowplot_theme() +
+    theme(axis.text.x = protocol_rotated_axis_text) +
+    theme(legend.position = "right") +
+    facet_wrap(vars(!!rlang::sym(plot_segment_col)))
+
+  # Save this figure only when persistence is enabled in YAML.
+  if (isTRUE(params$save_plots)) {
+    save_plot(filename = path(out_fig_norm, "geoDiffNormalisedDensity.png"), plot = geoDiffNormalisedDensity,
+              base_height = 8, base_width = 8, bg = "white")
+  }
+
+
+  print(geoDiffNormalisedDensity)
+
+} else {
+  message(glue::glue(
+    "GeoDiff density plot skipped: no GeoDiff-normalized object is available at {geodiff_norm_rds_path}. ",
+    "Q3/TMM density plots above remain available for non-GeoDiff review."
+  ))
+}
+```
+:::
+
+## Segment marker expression
+
+Plot configured marker genes across segment groups for each normalization output as an additional QC/context view. Marker availability is checked independently for every method before plotting.
+
+::: {.callout-note}
+## Why marker availability can differ between methods
+TMM, Q3, and negative-probe normalization use the Stage 1 detection-filtered feature set. The optional GeoDiff route starts from the earlier Stage 1 QC-pass object and applies its own feature modeling, so a requested marker can be present for GeoDiff but absent from the other normalization matrices. An unavailable marker is reported and skipped; it is not evidence that normalization removed the marker.
+:::
+
+```{r prepare-segment-marker-plots}
+#| results: asis
+#| message: false
+#| warning: false
+
+# Normalize and validate the user-supplied YAML marker list once.
+requested_markers <- as.character(unlist(params$marker_genes, use.names = FALSE))
+requested_markers <- trimws(requested_markers)
+requested_markers <- requested_markers[!is.na(requested_markers) & nzchar(requested_markers)]
+requested_markers <- requested_markers[!duplicated(toupper(requested_markers))]
+
+if (length(requested_markers) == 0) {
+  stop(
+    "params$marker_genes is empty. Provide at least one marker gene before rendering Stage 3.",
+    call. = FALSE
+  )
+}
+
+# Build each method matrix once so validation and plotting use the same feature universe.
+marker_matrices <- list(
+  TMM = cpm(TMM_norm_data, log = TRUE),
+  Q3 = log2(assayDataElement(target_spatial_data, elt = params$q3_toElt)),
+  `Negative probe` = log2(assayDataElement(target_spatial_data, elt = params$neg_toElt))
+)
+
+if (isTRUE(geodiff_route_active)) {
+  marker_matrices[["GeoDiff"]] <- assayDataElement(
+    spatial_data_geoDiff[, ROIs_high],
+    elt = "normmat"
+  )
+}
+
+match_markers_in_matrix <- function(mat, method_name, requested) {
+  matrix_features <- rownames(mat)
+  if (is.null(matrix_features)) matrix_features <- character()
+
+  matched_features <- matrix_features[
+    match(toupper(requested), toupper(matrix_features))
+  ]
+
+  tibble::tibble(
+    Normalization_method = method_name,
+    Requested_marker = requested,
+    Matched_feature = matched_features,
+    Available = !is.na(matched_features)
+  )
+}
+
+marker_lookups <- purrr::imap(
+  marker_matrices,
+  ~ match_markers_in_matrix(.x, .y, requested_markers)
+)
+
+marker_availability <- dplyr::bind_rows(marker_lookups) %>%
+  dplyr::mutate(
+    Status = dplyr::if_else(.data$Available, "Available", "Not present; plot facet skipped"),
+    Matched_feature = dplyr::coalesce(.data$Matched_feature, "—")
+  )
+
+marker_availability_table <- marker_availability %>%
+  dplyr::transmute(
+    `Normalization method` = .data$Normalization_method,
+    `Requested marker` = .data$Requested_marker,
+    `Matched matrix feature` = .data$Matched_feature,
+    Status = .data$Status
+  )
+
+knitr::kable(
+  marker_availability_table,
+  row.names = FALSE,
+  caption = paste(
+    "Marker-gene availability by normalization method.",
+    "Review unavailable markers before interpreting differences between method-specific panels."
+  )
+)
+
+missing_marker_summary <- marker_availability %>%
+  dplyr::filter(!.data$Available) %>%
+  dplyr::group_by(.data$Normalization_method) %>%
+  dplyr::summarise(
+    Missing_markers = paste(.data$Requested_marker, collapse = ", "),
+    .groups = "drop"
+  )
+
+if (nrow(missing_marker_summary) > 0) {
+  warning_lines <- paste0(
+    "- **", missing_marker_summary$Normalization_method, "**: ",
+    missing_marker_summary$Missing_markers
+  )
+
+  knitr::asis_output(paste0(
+    "\n::: {.callout-warning}\n",
+    "## Requested markers unavailable in one or more matrices\n",
+    "The following markers are not present in the indicated method-specific feature sets and will be skipped:\n\n",
+    paste(warning_lines, collapse = "\n"),
+    "\n\nThe notebook will continue. Confirm that the YAML marker list and earlier-stage feature-filtering decisions are appropriate for the study.\n",
+    ":::\n"
+  ))
+}
+
+marker_plot_from_mat <- function(mat, metaData, col_segment, marker_lookup) {
+  available_markers <- marker_lookup %>%
+    dplyr::filter(.data$Available)
+
+  if (nrow(available_markers) == 0) return(NULL)
+
+  marker_long <- purrr::map2_dfr(
+    available_markers$Requested_marker,
+    available_markers$Matched_feature,
+    function(gene_nm, row_nm) {
+      tibble::tibble(
+        AOI = colnames(mat),
+        Expression = as.numeric(mat[row_nm, , drop = TRUE]),
+        Gene = gene_nm
+      )
+    }
+  ) %>%
+    dplyr::mutate(
+      Gene = factor(.data$Gene, levels = available_markers$Requested_marker)
+    )
+
+  marker_metadata <- metaData %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column(var = "AOI")
+
+  marker_long %>%
+    dplyr::inner_join(marker_metadata, by = "AOI") %>%
+    ggplot(aes(x = .data[[col_segment]], y = .data$Expression, fill = .data[[col_segment]])) +
+    geom_boxplot() +
+    ylab("log2 normalized values") +
+    xlab("Segment") +
+    protocol_cowplot_theme() +
+    theme(axis.text.x = protocol_rotated_axis_text) +
+    facet_wrap(~Gene, scales = "free_y")
+}
+
+marker_plot_skip_note <- function(method_name) {
+  knitr::asis_output(paste0(
+    "\n::: {.callout-warning}\n",
+    "## ", method_name, " marker plot skipped\n",
+    "None of the requested marker genes are present in the ", method_name,
+    " matrix. Review the availability table above and update `params$marker_genes` if another marker is required.\n",
+    ":::\n"
+  ))
+}
+
+metaData <- normalisation_plot_metadata
+```
+
+::: panel-tabset
+## TMM
+
+```{r plot-segment-markers-tmm}
+#| label: fig-segmentMarkers-TMM
+#| fig-cap: Boxplot of marker-gene expression after TMM normalization by segment. Segment-specific marker separation should remain biologically interpretable.
+#| fig-width: 9
+#| fig-height: 6
+#| warning: false
+
+g <- marker_plot_from_mat(
+  marker_matrices[["TMM"]],
+  metaData,
+  col_segment,
+  marker_lookups[["TMM"]]
+)
+
+if (is.null(g)) {
+  marker_plot_skip_note("TMM")
+} else {
+  # Save output conditionally to support fast exploratory runs without file writes.
+  if (isTRUE(params$save_plots)) {
+    save_plot(filename = path(out_fig_norm, "antibodyValues_TMM.png"), plot = g, bg = "white")
+  }
+  print(g)
+}
+```
+
+## Q3
+
+```{r plot-segment-markers-q3}
+#| label: fig-segmentMarkers-Q3
+#| fig-cap: Boxplot of marker-gene expression after Q3 normalization by segment. Marker patterns should remain consistent with expected tissue biology.
+#| fig-width: 9
+#| fig-height: 6
+#| warning: false
+
+g <- marker_plot_from_mat(
+  marker_matrices[["Q3"]],
+  metaData,
+  col_segment,
+  marker_lookups[["Q3"]]
+)
+
+if (is.null(g)) {
+  marker_plot_skip_note("Q3")
+} else {
+  # Save output conditionally to support fast exploratory runs without file writes.
+  if (isTRUE(params$save_plots)) {
+    save_plot(filename = path(out_fig_norm, "antibodyValues_Q3.png"), plot = g, bg = "white")
+  }
+  print(g)
+}
+```
+
+## Negative probe normalization
+
+```{r plot-segment-markers-negprobe}
+#| label: fig-segmentMarkers-negProbe
+#| fig-cap: Boxplot of marker-gene expression after negative-probe normalization by segment. Unexpected marker collapse may indicate over-correction.
+#| fig-width: 9
+#| fig-height: 6
+#| warning: false
+
+g <- marker_plot_from_mat(
+  marker_matrices[["Negative probe"]],
+  metaData,
+  col_segment,
+  marker_lookups[["Negative probe"]]
+)
+
+if (is.null(g)) {
+  marker_plot_skip_note("Negative probe")
+} else {
+  # Save output conditionally to support fast exploratory runs without file writes.
+  if (isTRUE(params$save_plots)) {
+    save_plot(filename = path(out_fig_norm, "antibodyValues_negProbe.png"), plot = g, bg = "white")
+  }
+  print(g)
+}
+```
+
+## GeoDiff
+
+```{r plot-segment-markers-geodiff}
+#| label: fig-segmentMarkers-GeoDiff
+#| fig-cap: Boxplot of marker-gene expression after GeoDiff-normalized normmat calculation by segment. Preserved marker contrast supports later differential analysis.
+#| fig-width: 9
+#| fig-height: 6
+#| warning: false
+
+if (isTRUE(geodiff_route_active)) {
+  g <- marker_plot_from_mat(
+    marker_matrices[["GeoDiff"]],
+    metaData,
+    col_segment,
+    marker_lookups[["GeoDiff"]]
+  )
+
+  if (is.null(g)) {
+    marker_plot_skip_note("GeoDiff")
+  } else {
+    # Save output conditionally to support fast exploratory runs without file writes.
+    if (isTRUE(params$save_plots)) {
+      save_plot(filename = path(out_fig_norm, "antibodyValues_GeoDiff.png"), plot = g, bg = "white")
+    }
+    print(g)
+  }
+} else {
+  message(glue::glue(
+    "GeoDiff marker-gene plot skipped: no GeoDiff-normalized object is available at {geodiff_norm_rds_path}. ",
+    "Non-GeoDiff marker plots remain available above."
+  ))
+}
+```
+:::
+Use the generated plots and saved outputs as inputs to later model-selection and differential-expression workflows.
+
+::: {.callout-note collapse="true"}
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
+:::
