@@ -1,0 +1,4 @@
+input,required_for_stage8,path,file_found,action
+Selected Stage 8 input,Yes,C:/R/gmx/Example_Dataset/Outputs/3_Norm/results/normalised_spatial_data.RDS,TRUE,This object will be loaded for SpatialDecon.
+Default Q3/negative-probe object,Recommended default,C:/R/gmx/Example_Dataset/Outputs/3_Norm/results/normalised_spatial_data.RDS,TRUE,Available for the recommended Stage 8 option that does not require GeoDiff.
+Optional GeoDiff-normalized object,No,C:/R/gmx/Example_Dataset/Outputs/3_Norm/results/GeoDiff_normalised_spatial_data.RDS,TRUE,Available if the user explicitly selects the GeoDiff normmat option.

@@ -1,0 +1,6 @@
+Key_annotation,Segment,Retained_segments,Review_threshold,Meets_review_threshold
+Healthy,Panck,91,3,TRUE
+Healthy,Panck Cd45 Negative,20,3,TRUE
+Tumor,Panck+(Epi),62,3,TRUE
+Tumor,Panck+(Epithelial),56,3,TRUE
+Tumor,Panck-(Stroma),24,3,TRUE

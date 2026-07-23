@@ -1,0 +1,4 @@
+object_name,file_path,file_exists
+Q3,C:/R/gmx/Example_Dataset/Outputs/3_Norm/results/normalised_spatial_data.RDS,TRUE
+GeoDiff,C:/R/gmx/Example_Dataset/Outputs/3_Norm/results/GeoDiff_normalised_spatial_data.RDS,TRUE
+TMM,C:/R/gmx/Example_Dataset/Outputs/3_Norm/results/TMM_normalised_spatial_data.RDS,TRUE

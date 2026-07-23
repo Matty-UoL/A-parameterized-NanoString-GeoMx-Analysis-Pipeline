@@ -1,0 +1,6 @@
+Audit_item,Value,Interpretation
+slide_name column present,TRUE,GeoMxTools expects this metadata field as 'slide name' when building the NanoStringGeoMxSet.
+metadata rows before template-control exclusion,277,Rows available after sample ID normalization and before template-control filtering.
+rows with missing slide_name,0,Rows retained because template-control status cannot be inferred from slide metadata.
+rows flagged as likely template controls,0,Rows excluded before DCC matching because slide_name contains 'template' case-insensitively.
+rows retained after template-control exclusion,277,Rows carried forward into DCC matching and GeoMx object construction.

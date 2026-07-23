@@ -1,0 +1,10 @@
+contrast_factor,shared_de_group_level
+Annotation,Acinar_Healthy
+Annotation,Acinar_Tumor
+Annotation,ADM_Healthy
+Annotation,Duct_Healthy
+Annotation,Duct_Tumor
+Annotation,Glandular_Tumor_Tumor
+Annotation,PanIN_Healthy
+Annotation,PanIN_Tumor
+Annotation,PoorlyDiffTumor_Tumor

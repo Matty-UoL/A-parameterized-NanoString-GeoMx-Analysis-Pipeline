@@ -1,0 +1,3 @@
+collection_name,gmt_file,term_prefix_to_strip,enabled,resolved_path
+Hallmark,h.all.v2026.1.Hs.symbols.gmt,HALLMARK_,TRUE,C:/R/gmx/src/h.all.v2026.1.Hs.symbols.gmt
+Reactome,c2.cp.reactome.v2026.1.Hs.symbols.gmt,REACTOME_,TRUE,C:/R/gmx/src/c2.cp.reactome.v2026.1.Hs.symbols.gmt

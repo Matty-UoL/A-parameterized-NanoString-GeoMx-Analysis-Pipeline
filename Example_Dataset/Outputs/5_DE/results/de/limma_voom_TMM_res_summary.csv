@@ -1,0 +1,10 @@
+method,contrast,n_tested,n_sig,n_up,n_down
+limma_voom_TMM,Acinar_Healthy - (Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,7792,1800,598,1202
+limma_voom_TMM,Acinar_Tumor - (Acinar_Healthy + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,7792,1186,753,433
+limma_voom_TMM,ADM_Healthy - (Acinar_Healthy + Acinar_Tumor + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,7792,746,240,506
+limma_voom_TMM,Duct_Healthy - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,7792,958,340,618
+limma_voom_TMM,Duct_Tumor - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,7792,761,551,210
+limma_voom_TMM,Glandular_Tumor_Tumor - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,7792,814,567,247
+limma_voom_TMM,PanIN_Healthy - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,7792,1036,291,745
+limma_voom_TMM,PanIN_Tumor - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PoorlyDiffTumor_Tumor)/8,7792,604,443,161
+limma_voom_TMM,PoorlyDiffTumor_Tumor - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor)/8,7792,1543,987,556

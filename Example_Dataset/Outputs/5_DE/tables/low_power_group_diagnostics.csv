@@ -1,0 +1,11 @@
+DE_Group,n_samples,n_patients,low_sample_power,low_patient_power,low_power
+ADM_Healthy,31,2,FALSE,FALSE,FALSE
+ADM_Tumor,1,1,TRUE,FALSE,TRUE
+Acinar_Healthy,20,2,FALSE,FALSE,FALSE
+Acinar_Tumor,24,4,FALSE,FALSE,FALSE
+Duct_Healthy,20,2,FALSE,FALSE,FALSE
+Duct_Tumor,26,3,FALSE,FALSE,FALSE
+Glandular_Tumor_Tumor,34,3,FALSE,FALSE,FALSE
+PanIN_Healthy,40,2,FALSE,FALSE,FALSE
+PanIN_Tumor,48,4,FALSE,FALSE,FALSE
+PoorlyDiffTumor_Tumor,9,1,FALSE,FALSE,FALSE

@@ -1,0 +1,10 @@
+contrast,upregulated,downregulated
+Acinar_Healthy - (Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,920,1208
+Acinar_Tumor - (Acinar_Healthy + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,721,622
+ADM_Healthy - (Acinar_Healthy + Acinar_Tumor + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,478,520
+Duct_Healthy - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,682,637
+Duct_Tumor - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,481,347
+Glandular_Tumor_Tumor - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + PanIN_Healthy + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,479,390
+PanIN_Healthy - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Tumor + PoorlyDiffTumor_Tumor)/8,512,779
+PanIN_Tumor - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PoorlyDiffTumor_Tumor)/8,410,223
+PoorlyDiffTumor_Tumor - (Acinar_Healthy + Acinar_Tumor + ADM_Healthy + Duct_Healthy + Duct_Tumor + Glandular_Tumor_Tumor + PanIN_Healthy + PanIN_Tumor)/8,1081,865

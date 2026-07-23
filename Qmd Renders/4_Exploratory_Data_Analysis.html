@@ -6,7 +6,7 @@
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
-<meta name="dcterms.date" content="2026-07-01">
+<meta name="dcterms.date" content="2026-07-23">
 
 <title>Spatial Transcriptomics</title>
 <style>
@@ -3170,7 +3170,7 @@ font-family: "Segoe UI", Arial, sans-serif !important;
     <div>
     <div class="quarto-title-meta-heading">Published</div>
     <div class="quarto-title-meta-contents">
-      <p class="date">2026-07-01</p>
+      <p class="date">2026-07-23</p>
     </div>
   </div>
   
@@ -4055,7 +4055,7 @@ Reproducibility caution
 <span id="cb4-628"><a href="#cb4-628" aria-hidden="true" tabindex="-1"></a>}</span>
 <span id="cb4-629"><a href="#cb4-629" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb4-630"><a href="#cb4-630" aria-hidden="true" tabindex="-1"></a><span class="co"># Screen resolved variables for variancePartition: keep only present columns, drop</span></span>
-<span id="cb4-631"><a href="#cb4-631" aria-hidden="true" tabindex="-1"></a><span class="co"># constant columns, drop categorical columns that are unique per ROI (a random</span></span>
+<span id="cb4-631"><a href="#cb4-631" aria-hidden="true" tabindex="-1"></a><span class="co"># constant columns, drop categorical columns that are unique per segment (a random</span></span>
 <span id="cb4-632"><a href="#cb4-632" aria-hidden="true" tabindex="-1"></a><span class="co"># effect with one observation per level is degenerate), coerce types, and report</span></span>
 <span id="cb4-633"><a href="#cb4-633" aria-hidden="true" tabindex="-1"></a><span class="co"># every drop. Returns the cleaned metadata frame plus the kept term lists.</span></span>
 <span id="cb4-634"><a href="#cb4-634" aria-hidden="true" tabindex="-1"></a>screen_varpart_covariates <span class="ot">&lt;-</span> <span class="cf">function</span>(pheno, categorical, continuous) {</span>
@@ -4073,7 +4073,7 @@ Reproducibility caution
 <span id="cb4-646"><a href="#cb4-646" aria-hidden="true" tabindex="-1"></a>      <span class="cf">next</span></span>
 <span id="cb4-647"><a href="#cb4-647" aria-hidden="true" tabindex="-1"></a>    }</span>
 <span id="cb4-648"><a href="#cb4-648" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (n_lev <span class="sc">==</span> n_row) {</span>
-<span id="cb4-649"><a href="#cb4-649" aria-hidden="true" tabindex="-1"></a>      <span class="fu">message</span>(<span class="st">&quot;[variance partition] dropping categorical &#39;&quot;</span>, v, <span class="st">&quot;&#39;: one level per ROI (degenerate random effect).&quot;</span>)</span>
+<span id="cb4-649"><a href="#cb4-649" aria-hidden="true" tabindex="-1"></a>      <span class="fu">message</span>(<span class="st">&quot;[variance partition] dropping categorical &#39;&quot;</span>, v, <span class="st">&quot;&#39;: one level per segment (degenerate random effect).&quot;</span>)</span>
 <span id="cb4-650"><a href="#cb4-650" aria-hidden="true" tabindex="-1"></a>      <span class="cf">next</span></span>
 <span id="cb4-651"><a href="#cb4-651" aria-hidden="true" tabindex="-1"></a>    }</span>
 <span id="cb4-652"><a href="#cb4-652" aria-hidden="true" tabindex="-1"></a>    pheno[[v]] <span class="ot">&lt;-</span> <span class="fu">factor</span>(<span class="fu">as.character</span>(x))</span>
@@ -4789,7 +4789,7 @@ What this shows
 </div>
 <div class="callout-body-container callout-body">
 <p>Each violin is the distribution, across genes, of the percentage of expression variance attributed to one variable. A tall violin reaching high percentages means that variable is a strong driver of expression (for example a slide or patient effect); a violin squashed near zero means it explains little. The <strong>Residuals</strong> violin is the variance left unexplained by the model. Use this to decide which variables to include as covariates or random effects in the differential-expression model (<code>5_Differential_Expression_Calculation.qmd</code>): variables that explain a large, unwanted share of variance are good candidates to adjust for.</p>
-<p>Categorical variables (set in <code>varpart_categorical</code>) are modelled as random effects; continuous variables (<code>varpart_continuous</code>) enter as fixed numeric terms. Variables that are constant or unique to a single ROI are dropped automatically.</p>
+<p>Categorical variables (set in <code>varpart_categorical</code>) are modelled as random effects; continuous variables (<code>varpart_continuous</code>) enter as fixed numeric terms. Variables that are constant or unique to a single segment are dropped automatically.</p>
 </div>
 </div>
 <div class="callout callout-style-default callout-tip callout-titled">
@@ -5579,7 +5579,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-45"><a href="#cb22-45" aria-hidden="true" tabindex="-1"></a><span class="co">  # Root, same convention as QC / GeoDiff / Norm</span></span>
 <span id="cb22-46"><a href="#cb22-46" aria-hidden="true" tabindex="-1"></a><span class="co">  project_root: &quot;.&quot;</span></span>
 <span id="cb22-47"><a href="#cb22-47" aria-hidden="true" tabindex="-1"></a><span class="co">  # Conservative full-path budget for cross-platform R and graphics-device compatibility.</span></span>
-<span id="cb22-48"><a href="#cb22-48" aria-hidden="true" tabindex="-1"></a><span class="co">  portable_path_limit: 240</span></span>
+<span id="cb22-48"><a href="#cb22-48" aria-hidden="true" tabindex="-1"></a><span class="co">  portable_path_limit: 200</span></span>
 <span id="cb22-49"><a href="#cb22-49" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb22-50"><a href="#cb22-50" aria-hidden="true" tabindex="-1"></a><span class="co">  # Fixed folder names under root</span></span>
 <span id="cb22-51"><a href="#cb22-51" aria-hidden="true" tabindex="-1"></a><span class="co">  dir_outputs: &quot;Outputs&quot;</span></span>
@@ -5658,7 +5658,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-124"><a href="#cb22-124" aria-hidden="true" tabindex="-1"></a><span class="co">  # varpart_categorical and any measured numeric variables under varpart_continuous.</span></span>
 <span id="cb22-125"><a href="#cb22-125" aria-hidden="true" tabindex="-1"></a><span class="co">  # Leave BOTH lists empty to auto-classify from `metadata_columns` (numeric columns</span></span>
 <span id="cb22-126"><a href="#cb22-126" aria-hidden="true" tabindex="-1"></a><span class="co">  # become continuous, everything else categorical). Columns that are constant, or</span></span>
-<span id="cb22-127"><a href="#cb22-127" aria-hidden="true" tabindex="-1"></a><span class="co">  # unique to a single ROI (which would make a random effect meaningless), are</span></span>
+<span id="cb22-127"><a href="#cb22-127" aria-hidden="true" tabindex="-1"></a><span class="co">  # unique to a single segment (which would make a random effect meaningless), are</span></span>
 <span id="cb22-128"><a href="#cb22-128" aria-hidden="true" tabindex="-1"></a><span class="co">  # dropped automatically with a message.</span></span>
 <span id="cb22-129"><a href="#cb22-129" aria-hidden="true" tabindex="-1"></a><span class="co">  varpart_run: true</span></span>
 <span id="cb22-130"><a href="#cb22-130" aria-hidden="true" tabindex="-1"></a><span class="co">  varpart_categorical:</span></span>
@@ -6521,7 +6521,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-987"><a href="#cb22-987" aria-hidden="true" tabindex="-1"></a><span class="in">}</span></span>
 <span id="cb22-988"><a href="#cb22-988" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb22-989"><a href="#cb22-989" aria-hidden="true" tabindex="-1"></a><span class="in"># Screen resolved variables for variancePartition: keep only present columns, drop</span></span>
-<span id="cb22-990"><a href="#cb22-990" aria-hidden="true" tabindex="-1"></a><span class="in"># constant columns, drop categorical columns that are unique per ROI (a random</span></span>
+<span id="cb22-990"><a href="#cb22-990" aria-hidden="true" tabindex="-1"></a><span class="in"># constant columns, drop categorical columns that are unique per segment (a random</span></span>
 <span id="cb22-991"><a href="#cb22-991" aria-hidden="true" tabindex="-1"></a><span class="in"># effect with one observation per level is degenerate), coerce types, and report</span></span>
 <span id="cb22-992"><a href="#cb22-992" aria-hidden="true" tabindex="-1"></a><span class="in"># every drop. Returns the cleaned metadata frame plus the kept term lists.</span></span>
 <span id="cb22-993"><a href="#cb22-993" aria-hidden="true" tabindex="-1"></a><span class="in">screen_varpart_covariates &lt;- function(pheno, categorical, continuous) {</span></span>
@@ -6539,7 +6539,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-1005"><a href="#cb22-1005" aria-hidden="true" tabindex="-1"></a><span class="in">      next</span></span>
 <span id="cb22-1006"><a href="#cb22-1006" aria-hidden="true" tabindex="-1"></a><span class="in">    }</span></span>
 <span id="cb22-1007"><a href="#cb22-1007" aria-hidden="true" tabindex="-1"></a><span class="in">    if (n_lev == n_row) {</span></span>
-<span id="cb22-1008"><a href="#cb22-1008" aria-hidden="true" tabindex="-1"></a><span class="in">      message(&quot;[variance partition] dropping categorical &#39;&quot;, v, &quot;&#39;: one level per ROI (degenerate random effect).&quot;)</span></span>
+<span id="cb22-1008"><a href="#cb22-1008" aria-hidden="true" tabindex="-1"></a><span class="in">      message(&quot;[variance partition] dropping categorical &#39;&quot;, v, &quot;&#39;: one level per segment (degenerate random effect).&quot;)</span></span>
 <span id="cb22-1009"><a href="#cb22-1009" aria-hidden="true" tabindex="-1"></a><span class="in">      next</span></span>
 <span id="cb22-1010"><a href="#cb22-1010" aria-hidden="true" tabindex="-1"></a><span class="in">    }</span></span>
 <span id="cb22-1011"><a href="#cb22-1011" aria-hidden="true" tabindex="-1"></a><span class="in">    pheno[[v]] &lt;- factor(as.character(x))</span></span>
@@ -7115,7 +7115,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-1581"><a href="#cb22-1581" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb22-1582"><a href="#cb22-1582" aria-hidden="true" tabindex="-1"></a>Categorical variables (set in <span class="in">`varpart_categorical`</span>) are modelled as random effects;</span>
 <span id="cb22-1583"><a href="#cb22-1583" aria-hidden="true" tabindex="-1"></a>continuous variables (<span class="in">`varpart_continuous`</span>) enter as fixed numeric terms. Variables</span>
-<span id="cb22-1584"><a href="#cb22-1584" aria-hidden="true" tabindex="-1"></a>that are constant or unique to a single ROI are dropped automatically.</span>
+<span id="cb22-1584"><a href="#cb22-1584" aria-hidden="true" tabindex="-1"></a>that are constant or unique to a single segment are dropped automatically.</span>
 <span id="cb22-1585"><a href="#cb22-1585" aria-hidden="true" tabindex="-1"></a>:::</span>
 <span id="cb22-1586"><a href="#cb22-1586" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb22-1587"><a href="#cb22-1587" aria-hidden="true" tabindex="-1"></a>::: {.callout-tip}</span>
@@ -7228,7 +7228,7 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 <span id="cb22-1694"><a href="#cb22-1694" aria-hidden="true" tabindex="-1"></a>:::</span></code><button title="Copy to Clipboard" class="code-copy-button" data-in-quarto-modal><i class="bi"></i></button></pre></div>
 </div></div></div></div></div>
 </div> <!-- /content -->
-<script>var lightboxQuarto = GLightbox({"loop":false,"closeEffect":"zoom","descPosition":"bottom","openEffect":"zoom","selector":".lightbox"});
+<script>var lightboxQuarto = GLightbox({"closeEffect":"zoom","descPosition":"bottom","loop":false,"selector":".lightbox","openEffect":"zoom"});
 (function() {
   let previousOnload = window.onload;
   window.onload = () => {

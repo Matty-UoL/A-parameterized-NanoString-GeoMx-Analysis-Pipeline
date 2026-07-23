@@ -1,0 +1,13 @@
+item,value
+Reference source,local_file
+Reference matrix,Pancreas_HCA
+Reference species,Human
+Reference age group,Adult
+Reference cache/file,C:/R/gmx/Example_Dataset/Data/Spatial_Deconvolution_References/Pancreas_HCA.RData
+Saved reference object,Example_Dataset/Outputs/8_Deconvolution/results/decon/stage8_reference_matrix.rds
+Reference genes,15975
+Reference cell types,6
+GeoMx features,7792
+Overlapping genes,6958
+Reference overlap,43.6%
+GeoMx feature overlap,89.3%

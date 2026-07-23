@@ -1,0 +1,6 @@
+method_name,n_unique_significant_genes
+dream_GeoDiffCounts,4140
+limma_voom_TMM,3115
+limma_voom_GeoDiff,4190
+limma_trend_Q3,3137
+limma_trend_GeoDiff,17559

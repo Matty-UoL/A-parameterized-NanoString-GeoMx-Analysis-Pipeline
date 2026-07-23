@@ -1,0 +1,6 @@
+method_name,n_contrasts,total_significant_gene_contrast_hits,median_significant_per_contrast,max_significant_in_one_contrast
+dream_GeoDiffCounts,9,11063,1243,2085
+limma_trend_GeoDiff,9,89816,10596,14406
+limma_trend_Q3,9,9142,961,1746
+limma_voom_GeoDiff,9,11355,1291,2128
+limma_voom_TMM,9,9448,958,1800

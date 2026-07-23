@@ -1,0 +1,8 @@
+item,value
+Input object,Example_Dataset/Outputs/3_Norm/results/normalised_spatial_data.RDS
+Normalized assay,q_norm
+Raw assay,exprs
+Features,7792
+Samples,253
+Metadata context columns,"segment, cell_type, disease_status, patient_id, slide_name"
+Heatmap annotation columns,"segment, cell_type, disease_status, slide_name"

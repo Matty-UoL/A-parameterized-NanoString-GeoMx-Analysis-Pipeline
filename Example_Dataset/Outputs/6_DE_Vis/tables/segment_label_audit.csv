@@ -1,0 +1,2 @@
+selected_method,segment_column,samples_checked,samples_with_missing_or_blank_segment,segment_levels,status
+limma_trend_GeoDiff,segment,277,0,Panck; Panck-(Stroma); Panck Cd45 Negative; Panck+(Epi); Panck+(Epithelial),passed

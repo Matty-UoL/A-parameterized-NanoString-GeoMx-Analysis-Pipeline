@@ -1,0 +1,2 @@
+selected_de_method,method_available,requested_contrasts,contrasts_available_in_method,contrasts_used,missing_requested_contrasts,status,action
+limma_trend_GeoDiff,TRUE,<all contrasts in selected method>,9,9,<none>,ready,Proceed with selected-method figures.

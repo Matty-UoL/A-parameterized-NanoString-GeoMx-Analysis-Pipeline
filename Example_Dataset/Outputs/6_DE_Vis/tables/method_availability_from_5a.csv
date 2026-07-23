@@ -1,0 +1,6 @@
+method_name,file_name,file_path,file_exists
+dream_GeoDiffCounts,dream_results.RDS,C:/R/gmx/Example_Dataset/Outputs/5_DE/results/de/dream_results.RDS,TRUE
+limma_voom_TMM,limma_voom_TMM_results.RDS,C:/R/gmx/Example_Dataset/Outputs/5_DE/results/de/limma_voom_TMM_results.RDS,TRUE
+limma_voom_GeoDiff,limma_voom_GeoDiff_results.RDS,C:/R/gmx/Example_Dataset/Outputs/5_DE/results/de/limma_voom_GeoDiff_results.RDS,TRUE
+limma_trend_Q3,limma_trend_Q3_results.RDS,C:/R/gmx/Example_Dataset/Outputs/5_DE/results/de/limma_trend_Q3_results.RDS,TRUE
+limma_trend_GeoDiff,limma_trend_GeoDiff_results.RDS,C:/R/gmx/Example_Dataset/Outputs/5_DE/results/de/limma_trend_GeoDiff_results.RDS,TRUE
